@@ -40,13 +40,15 @@ This is the official repo of our MICCAI 2025 paper [RadGS-Reg: Registering Spine
 
 [//]: # (* 2025.10.25: Code, data, and models have been released. Welcome to have a try!)
 
+* Code, data and models will be released by June 30, 2025.
+
 * 2025.05.13: Our work has been provisional accepted to MICCAI 2025.
 
 [//]: # (* 2025.05.13: Our paper is available on [arxiv]&#40;https://arxiv.org/abs/2405.20693&#41;.)
 
 ## 1. Installation
 
-Code, data and models will be released by June 30, 2025.
+
 
 [//]: # (We recommend using [Conda]&#40;https://docs.conda.io/en/latest/miniconda.html&#41; to set up an environment. We tested the code on Ubuntu 20.04 with an RTX 3090 GPU. For installation issues on other platforms, please refer to [Gaussian Splatting]&#40;https://github.com/graphdeco-inria/gaussian-splatting&#41;.)
 
