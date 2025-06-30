@@ -5,7 +5,7 @@
 <p align="center"> <img src="assets/logo.png" width="250px"> </p>
 
 [//]: # (![arXiv]&#40;https://img.shields.io/badge/paper-arxiv-179bd3&#41; )
-[![arXiv](https://img.shields.io/badge/paper-arxiv-179bd3)](https://arxiv.org/abs/2403.04116)
+[//]: # ([![arXiv]&#40;https://img.shields.io/badge/paper-arxiv-179bd3&#41;]&#40;https://arxiv.org/abs/2403.04116&#41;)
 
 [//]: # ([![zhihu]&#40;https://img.shields.io/badge/知乎-解读-179bd3&#41;]&#40;https://zhuanlan.zhihu.com/p/717744222&#41;)
 
@@ -34,13 +34,13 @@
 
 ### Introduction
 
-This is the official repo of our MICCAI 2025 paper [RadGS-Reg: Registering Spine CT with Biplanar X-rays via Joint 3D Radiative Gaussians Reconstruction and 3D/3D Registration](https://arxiv.org/abs/2405.20693). If you find this repo useful, please give it a star ⭐ and consider citing our paper.
+[//]: # (This is the official repo of our MICCAI 2025 paper [RadGS-Reg: Registering Spine CT with Biplanar X-rays via Joint 3D Radiative Gaussians Reconstruction and 3D/3D Registration]&#40;https://arxiv.org/abs/2405.20693&#41;. If you find this repo useful, please give it a star ⭐ and consider citing our paper.)
 
 ### News
 
 [//]: # (* 2025.10.25: Code, data, and models have been released. Welcome to have a try!)
 
-* Code, data and models will be released by June 30, 2025.
+* Code, data and models will be released by July 30, 2025.
 
 * 2025.05.13: Our work has been provisional accepted to MICCAI 2025.
 
