@@ -5,7 +5,7 @@
 <p align="center"> <img src="assets/logo.png" width="250px"> </p>
 
 [//]: # (![arXiv]&#40;https://img.shields.io/badge/paper-arxiv-179bd3&#41; )
-[//]: # ([![arXiv]&#40;https://img.shields.io/badge/paper-arxiv-179bd3&#41;]&#40;https://arxiv.org/abs/2403.04116&#41;)
+[![arXiv](https://img.shields.io/badge/paper-arxiv-179bd3)](https://arxiv.org/abs/2508.21154)
 
 [//]: # ([![zhihu]&#40;https://img.shields.io/badge/知乎-解读-179bd3&#41;]&#40;https://zhuanlan.zhihu.com/p/717744222&#41;)
 
