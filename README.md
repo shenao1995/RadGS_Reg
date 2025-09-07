@@ -23,7 +23,7 @@
 
 ![cover](assets/pipeline.jpg)
 
-![demo](assets/recon_results.gif)
+![demo](assets/recon_results1.gif)
 
 ![demo](assets/reg_results.gif)
 </div>
