@@ -40,7 +40,7 @@
 
 [//]: # (* 2025.10.25: Code, data, and models have been released. Welcome to have a try!)
 
-* Code had been released now. 🥱🥱🥱
+* The code has been released. 🥱🥱🥱
 
 * 2025.05.13: Our work has been provisional accepted to MICCAI 2025.😆😆😆
 
