@@ -9,26 +9,6 @@ from r2_gaussian.utils.plot_utils import show_two_volume, show_three_volume, sho
 import numpy as np
 from sklearn.model_selection import train_test_split
 from monai.transforms import (
-    Activationsd,
-    AsDiscreted,
-    Compose,
-    EnsureChannelFirstd,
-    LoadImaged,
-    CropForegroundd,
-    Orientationd,
-    Resized,
-    SaveImaged,
-    ScaleIntensityd,
-    NormalizeIntensityd,
-    ConcatItemsd,
-    SaveImage,
-    Activations,
-    AsDiscrete,
-    EnsureType,
-    ToTensord,
-    KeepLargestConnectedComponent,
-    RemoveSmallObjects,
-    MapTransform,
     Resize,
     ScaleIntensity
 )
@@ -37,7 +17,6 @@ from monai.metrics import MSEMetric, SSIMMetric, PSNRMetric
 from r2_gaussian.dataset.GSDataset import GSDataset
 
 from r2_gaussian.gaussian import net_render, net_query
-# from net_utils import create_from_fbp
 from DVGSNet import DVGSNet
 import cv2
 import pyvista as pv
@@ -47,25 +26,8 @@ from r2_gaussian.utils.image_utils import metric_vol, metric_proj
 
 def inference_method(log_dir):
     # print(inference_files)
-    # keys = ["ap", "la", "ct"]
     ct_size = 128
     img_size = 128
-    # infer_transforms = Compose(
-    #     [
-    #         LoadImaged(image_only=True, keys=keys, ensure_channel_first=True),
-    #         Resized(keys=keys[-1], spatial_size=(ct_size, ct_size, ct_size), mode="trilinear",
-    #                 align_corners=True),
-    #         Resized(keys=keys[:-1], spatial_size=(img_size, img_size), mode="bilinear",
-    #                 align_corners=True),
-    #         ScaleIntensityd(keys=keys),
-    #     ]
-    # )
-    # # define dataset and dataloader
-    # val_ds = Dataset(data=inference_files, transform=infer_transforms)
-    # val_loader = DataLoader(val_ds, batch_size=1, num_workers=2, collate_fn=list_data_collate)
-
-    # saver = SaveImage(output_dir="./output/dual_view", output_ext=".nii", output_postfix="seg",
-    #                   separate_folder=False)
 
     batch_size = 1
     data_fold = 'G:/GS_DATA/real_vert_drr'

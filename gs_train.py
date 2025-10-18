@@ -22,42 +22,7 @@ from chamfer_loss import ChamferLoss
 from gs_infer import inference_method
 
 
-def model_engine():
-    fold_path = 'data/Vert/processed/images'
-    ap_arr, la_arr, ct_arr = ger_recon_data(fold_path)
-    ap_train, ap_test, la_train, la_test, ct_train, ct_test = (
-        train_test_split(ap_arr, la_arr, ct_arr, test_size=0.2, random_state=4))
-    # train_files = [{"ap": ap, "la": la, "pc": pc, "dens": den} for ap, la, pc, den in
-    #                zip(ap_train, la_train, pc_train, den_train)]
-    # val_files = [{"ap": ap, "la": la, "pc": pc, "dens": den} for ap, la, pc, den in
-    #              zip(ap_test, la_test, pc_test, den_test)]
-    train_files = [{"ap": ap, "la": la, "ct": ct} for ap, la, ct in
-                   zip(ap_train, la_train, ct_train)]
-    val_files = [{"ap": ap, "la": la, "ct": ct} for ap, la, ct in
-                 zip(ap_test, la_test, ct_test)]
-    model_fold = 'GSNet_input128_wR'
-    log_dir = 'gs_model/{}'.format(model_fold)
-    training(train_files, val_files, log_dir, model_fold)
-    # inference_method(val_files, log_dir, model_name)
-
-
-def ger_recon_data(data_path):
-    ap_list = []
-    la_list = []
-    ct_list = []
-    # dens_list = []
-    for file in os.listdir(data_path):
-        ct_list.append(os.path.join(data_path, file))
-        ap_list.append(os.path.join(data_path.replace('images', 'projections_png'), file.replace('.nii.gz', '_ap.png')))
-        la_list.append(os.path.join(data_path.replace('images', 'projections_png'), file.replace('.nii.gz', '_la.png')))
-
-    return np.array(ap_list), np.array(la_list), np.array(ct_list)
-
-
-# def training(train_files, val_files, model_dir, model_name):
 def training(model_dir, tensorboard_writer):
-    # keys = ["ap", "la", "pc", "dens"]
-    keys = ["ap", "la", "ct"]
     ct_size = 128
     img_size = 128
 
@@ -80,18 +45,6 @@ def training(model_dir, tensorboard_writer):
     num_points = 10000
     model = DVGSNet(in_channels=input_ch, base_channels=32, num_points=num_points, img_size=img_size).to(device)
 
-    # model = ResReconNet(in_channels=input_ch, out_channels=1, base_channels=32, depth=8, target_size=target_size,
-    #                     img_size=img_size).to(device)
-    # model = DVGSRecNet(
-    #     in_channels=input_ch,
-    #     out_channels=1,
-    #     base_channels=32,
-    #     depth=8,
-    #     target_size=target_size,
-    #     img_size=img_size,
-    #     num_points=num_points,
-    #     num_properties=8
-    # ).to(device)
     # MSE_loss = torch.nn.MSELoss()
     CD_loss = ChamferLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.00001)
@@ -106,21 +59,16 @@ def training(model_dir, tensorboard_writer):
     psnr_metric = PSNRMetric(max_val=25.0)
     # start a typical PyTorch training
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epoch_num)
+
     lambda_dssim = 0.2
     loss_dl1 = 1
-    # 每隔2次验证一次
     val_interval = 2
-    # 保存最佳的SSIM
     best_metric = -1
-    # 测试集dice最高时的epoch次数
     best_metric_epoch = -1
-    # 用于保存训练集的loss
     epoch_loss_values = []
-    # 用于保存测试集的loss
     val_loss_list = []
-    # 用于保存每次验证时的Dice
     metric_values = []
-    # 训练循环
+
     if os.path.exists(model_dir + '/model2.pth'):
         model.load_state_dict(torch.load(model_dir + '/model2.pth', map_location=device))
         epoch_num = 150
@@ -134,11 +82,6 @@ def training(model_dir, tensorboard_writer):
         step = 0
         for batch_data in train_loader:
             step += 1
-            # aps, las, gt_ct = (
-            #     batch_data["ap"].to(device),
-            #     batch_data["la"].to(device),
-            #     batch_data["ct"].to(device),
-            # )
             input_projs = batch_data["input_imgs"].to(device)
             # show_two_slice(input_projs[0, 0, :].squeeze(), input_projs[0, 1, :].squeeze(), title1='ap', title2='la')
             # gt_vols = batch_data["vol_gts"].to(device)
@@ -345,11 +288,6 @@ def training(model_dir, tensorboard_writer):
     # 保存曲线图像
     plt.savefig(os.path.join(model_dir, 'train_loss.jpg'), dpi=300)
     plt.close()
-
-    # val_acc = pd.DataFrame(data=val_accuracy_list)  # 数据有三列，列名分别为one,two,three
-    # val_acc.to_csv(model_dir.split('.p')[0] + '_acc_per_epoch.csv', encoding='gbk')
-    # val_miu = pd.DataFrame(data=val_miu)  # 数据有三列，列名分别为one,two,three
-    # val_miu.to_csv(model_dir.split('.p')[0] + '_miu_per_epoch.csv', encoding='gbk')
     # 绘制测试集的Dice训练次数的关系曲线
     plt.title("Val Mean SSIM")
     x = [val_interval * (i + 1) for i in range(len(metric_values))]
@@ -368,5 +306,5 @@ if __name__ == '__main__':
     # model_fold = 'GSNet_input128_wR_model2.pth'
     log_dir = 'gs_model/{}'.format(model_fold)
     tb_writer = net_output_and_logger(log_dir)
-    # training(log_dir, tb_writer)
+    training(log_dir, tb_writer)
     inference_method(log_dir + '/model2.pth')
