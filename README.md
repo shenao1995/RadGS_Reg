@@ -40,9 +40,9 @@
 
 [//]: # (* 2025.10.25: Code, data, and models have been released. Welcome to have a try!)
 
-* Code, data and models will be released by July 30, 2025.
+* Code had been released now. 🥱🥱🥱
 
-* 2025.05.13: Our work has been provisional accepted to MICCAI 2025.
+* 2025.05.13: Our work has been provisional accepted to MICCAI 2025.😆😆😆
 
 [//]: # (* 2025.05.13: Our paper is available on [arxiv]&#40;https://arxiv.org/abs/2405.20693&#41;.)
 
