@@ -4,8 +4,8 @@
 
 <p align="center"> <img src="assets/logo.png" width="250px"> </p>
 
-[//]: # (![arXiv]&#40;https://img.shields.io/badge/paper-arxiv-179bd3&#41; )
-[![arXiv](https://img.shields.io/badge/paper-arxiv-179bd3)](https://arxiv.org/abs/2508.21154)
+[![project](https://img.shields.io/badge/project-homepage-green)](https://shenao1995.github.io/RadGS-Reg-Homepage/)
+[![paper](https://img.shields.io/badge/paper-miccai-blue)](https://link.springer.com/chapter/10.1007/978-3-032-05114-1_44)
 
 [//]: # ([![zhihu]&#40;https://img.shields.io/badge/知乎-解读-179bd3&#41;]&#40;https://zhuanlan.zhihu.com/p/717744222&#41;)
 
