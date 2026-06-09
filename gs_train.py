@@ -16,8 +16,8 @@ from r2_gaussian.utils.log_utils import net_output_and_logger
 from r2_gaussian.dataset.GSDataset import GSDataset
 
 import matplotlib.pyplot as plt
-from DVGSNet import DVGSNet
-# from DVGSNet2 import DVGSNet
+# from DVGSNet import DVGSNet
+from DVGSNet_CAL import DVGSNet
 from chamfer_loss import ChamferLoss
 from gs_infer import inference_method
 
@@ -26,7 +26,7 @@ def training(model_dir, tensorboard_writer):
     ct_size = 128
     img_size = 128
 
-    data_fold = 'F:/BaiduNetdiskDownload/total_preprocess/vertebra_dataset'
+    data_fold = 'G:/GS_DATA/vertebra_dataset'
     # data_fold = 'F:/BaiduNetdiskDownload/total_preprocess/real_vert'
     imgs_path = sorted(glob.glob(os.path.join(data_fold, "*.pickle")))
     pcs_path = sorted(glob.glob(os.path.join(data_fold, "*.ply")))
@@ -43,10 +43,21 @@ def training(model_dir, tensorboard_writer):
     target_size = (ct_size, ct_size, ct_size)  # 可以修改为任意2的幂次尺寸
     input_ch = 2
     num_points = 10000
-    model = DVGSNet(in_channels=input_ch, base_channels=32, num_points=num_points, img_size=img_size).to(device)
-
+    # model = DVGSNet(in_channels=input_ch, base_channels=32, num_points=num_points, img_size=img_size).to(device)
+    model = DVGSNet(
+        in_channels=input_ch,
+        base_channels=32,
+        num_points=num_points,
+        img_size=img_size,
+        use_cal=False,
+        view_channels=1,
+        context_dim=512,
+        query_dim=32,
+        head_hidden_dim=256,
+        max_delta=0.1,
+    ).to(device)
     # MSE_loss = torch.nn.MSELoss()
-    CD_loss = ChamferLoss()
+    CD_loss = ChamferLoss(chunk_size=1024, max_target_points=4096, squared=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.00001)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 20, gamma=0.5, last_epoch=-1)
     # epoch_num = 150
@@ -69,8 +80,8 @@ def training(model_dir, tensorboard_writer):
     val_loss_list = []
     metric_values = []
 
-    if os.path.exists(model_dir + '/model2.pth'):
-        model.load_state_dict(torch.load(model_dir + '/model2.pth', map_location=device))
+    if os.path.exists(model_dir + '/model1.pth'):
+        model.load_state_dict(torch.load(model_dir + '/model1.pth', map_location=device))
         epoch_num = 150
     else:
         epoch_num = 150
@@ -96,7 +107,7 @@ def training(model_dir, tensorboard_writer):
             # outputs = model(input_projs.squeeze(2))
             # gaussian_params, vol_outputs = model(input_projs.squeeze(2), dVoxel, sVoxel, offOrigin)
             # gaussian_params = model(input_projs.squeeze(), dVoxel.squeeze(), sVoxel.squeeze(), offOrigin.squeeze())
-            gaussian_params = model(input_projs.squeeze())
+            gaussian_params = model(input_projs.squeeze(2))
             out_xyz = gaussian_params['xyz']
             # out_density = gaussian_params['density']
             # out_scales = gaussian_params["scaling"]
@@ -302,9 +313,9 @@ def training(model_dir, tensorboard_writer):
 
 if __name__ == '__main__':
     # model_engine()
-    model_fold = 'DVGSNet_input128_wR_cd0.5_temp'
+    model_fold = 'DVGSNet_input128_wR_cd0.5_modify'
     # model_fold = 'GSNet_input128_wR_model2.pth'
     log_dir = 'gs_model/{}'.format(model_fold)
     tb_writer = net_output_and_logger(log_dir)
     training(log_dir, tb_writer)
-    inference_method(log_dir + '/model2.pth')
+    # inference_method(log_dir + '/model1.pth')
