@@ -1,0 +1,46 @@
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.dll
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.venv/
+venv/
+env/
+
+# ---------------- 训练/推理产物（体积巨大，不入库）----------------
+gs_model/
+gs_model_output/
+runs/
+logs/
+*.pth
+*.pt
+*.ckpt
+*.nii
+*.nii.gz
+*.mha
+*.mhd
+*.dcm
+*.pkl
+*.pickle
+
+# ---------------- 第三方子模块的编译产物 ----------------
+r2_gaussian/submodules/simple-knn/
+r2_gaussian/submodules/xray-gaussian-rasterization-voxelization/third_party/
+r2_gaussian/submodules/xray-gaussian-rasterization-voxelization/build/
+r2_gaussian/submodules/xray-gaussian-rasterization-voxelization/**/*.egg-info/
+
+# ---------------- IDE / 系统 ----------------
+.idea/
+.vscode/
+*.iml
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+desktop.ini

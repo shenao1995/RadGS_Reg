@@ -11,6 +11,16 @@ def _atanh(x, eps=1e-6):
     return 0.5 * torch.log((1 + x) / (1 - x))
 
 
+def _inverse_softplus(x, eps=1e-8):
+    x = torch.as_tensor(x, dtype=torch.float32)
+    return torch.log(torch.expm1(x).clamp_min(eps))
+
+
+def _inverse_sigmoid(x, eps=1e-6):
+    x = torch.as_tensor(x, dtype=torch.float32).clamp(min=eps, max=1 - eps)
+    return torch.log(x / (1 - x))
+
+
 def make_grid_anchors(num_points, bound=1.0):
     side = math.ceil(num_points ** (1.0 / 3.0))
     coords = torch.linspace(-bound, bound, side)
@@ -172,11 +182,15 @@ class DVGSNet(nn.Module):
         learnable_anchors=True,
         anchor_init="grid",
         anchor_bound=1.0,
+        anchor_center=None,
         anchor_points=None,
         max_delta=0.1,
         bound_xyz=True,
         scale_min_bound=0.001,
         scale_max_bound=1.0,
+        scale_init=None,
+        density_init=0.01,
+        output_head_init_std=1e-4,
     ):
         super().__init__()
         self.num_points = num_points
@@ -185,11 +199,16 @@ class DVGSNet(nn.Module):
         self.view_channels = view_channels
         self.cal_subtract_context = cal_subtract_context
         self.learnable_anchors = learnable_anchors
-        self.anchor_bound = anchor_bound
-        self.max_delta = max_delta
         self.bound_xyz = bound_xyz
-        self.scale_min_bound = scale_min_bound
-        self.scale_max_bound = scale_max_bound
+        anchor_bound = float(anchor_bound)
+        anchor_center = torch.zeros(3) if anchor_center is None else torch.as_tensor(anchor_center, dtype=torch.float32)
+        if anchor_center.numel() != 3:
+            raise ValueError("anchor_center must contain 3 values")
+        self.register_buffer("anchor_bound", torch.tensor(anchor_bound, dtype=torch.float32))
+        self.register_buffer("anchor_center", anchor_center.reshape(3))
+        self.register_buffer("max_delta", torch.tensor(float(max_delta), dtype=torch.float32))
+        self.register_buffer("scale_min_bound", torch.tensor(float(scale_min_bound), dtype=torch.float32))
+        self.register_buffer("scale_max_bound", torch.tensor(float(scale_max_bound), dtype=torch.float32))
 
         feature_channels = base_channels * 16
         if use_cal:
@@ -223,9 +242,10 @@ class DVGSNet(nn.Module):
                 nn.Linear(context_dim, context_dim),
             )
 
-        anchors = self._init_anchors(num_points, anchor_init, anchor_bound, anchor_points)
+        anchors = self._init_anchors(num_points, anchor_init, anchor_bound, anchor_center, anchor_points)
         if learnable_anchors:
-            self.anchor_params = nn.Parameter(_atanh(anchors / anchor_bound))
+            local_anchors = ((anchors - anchor_center.reshape(1, 3)) / anchor_bound).clamp(-1 + 1e-6, 1 - 1e-6)
+            self.anchor_params = nn.Parameter(_atanh(local_anchors))
         else:
             self.register_buffer("anchors", anchors)
 
@@ -242,6 +262,28 @@ class DVGSNet(nn.Module):
             use_point_embeddings=use_point_embeddings,
         )
         self.density_activation = nn.Softplus()
+        self._init_output_head(scale_init, density_init, output_head_init_std)
+
+    def _init_output_head(self, scale_init, density_init, output_head_init_std):
+        final_layer = self.gaussian_head.mlp[-1]
+        if not isinstance(final_layer, nn.Linear):
+            return
+        nn.init.normal_(final_layer.weight, mean=0.0, std=output_head_init_std)
+        nn.init.zeros_(final_layer.bias)
+
+        scale_min = float(self.scale_min_bound)
+        scale_max = float(self.scale_max_bound)
+        if scale_init is None:
+            scale_init = scale_min + 0.35 * (scale_max - scale_min)
+        scale_init = min(max(float(scale_init), scale_min + 1e-6), scale_max - 1e-6)
+        scale_ratio = (scale_init - scale_min) / (scale_max - scale_min)
+        final_layer.bias.data[3:6] = _inverse_sigmoid(scale_ratio)
+
+        final_layer.bias.data[6] = 1.0
+        final_layer.bias.data[7:10] = 0.0
+
+        density_init = max(float(density_init), 1e-8)
+        final_layer.bias.data[10] = _inverse_softplus(density_init)
 
     def forward(self, x, x_la=None):
         context = self._forward_context(x, x_la)
@@ -251,7 +293,9 @@ class DVGSNet(nn.Module):
         delta = torch.tanh(raw[:, :, :3]) * self.max_delta
         xyz = anchors.unsqueeze(0) + delta
         if self.bound_xyz:
-            xyz = xyz.clamp(min=-self.anchor_bound, max=self.anchor_bound)
+            lower = self.anchor_center.view(1, 1, 3) - self.anchor_bound
+            upper = self.anchor_center.view(1, 1, 3) + self.anchor_bound
+            xyz = torch.max(torch.min(xyz, upper), lower)
 
         scales = torch.sigmoid(raw[:, :, 3:6]) * (self.scale_max_bound - self.scale_min_bound)
         scales = scales + self.scale_min_bound
@@ -267,7 +311,7 @@ class DVGSNet(nn.Module):
 
     def get_anchors(self):
         if self.learnable_anchors:
-            return torch.tanh(self.anchor_params) * self.anchor_bound
+            return self.anchor_center.view(1, 3) + torch.tanh(self.anchor_params) * self.anchor_bound
         return self.anchors
 
     def _forward_context(self, x, x_la=None):
@@ -299,17 +343,20 @@ class DVGSNet(nn.Module):
         return context
 
     @staticmethod
-    def _init_anchors(num_points, anchor_init, anchor_bound, anchor_points):
+    def _init_anchors(num_points, anchor_init, anchor_bound, anchor_center, anchor_points):
+        anchor_center = torch.as_tensor(anchor_center, dtype=torch.float32).reshape(1, 3)
         if anchor_points is not None:
             anchors = torch.as_tensor(anchor_points, dtype=torch.float32)
             if anchors.shape != (num_points, 3):
                 raise ValueError(f"anchor_points must have shape ({num_points}, 3)")
-            return anchors.clamp(-anchor_bound, anchor_bound)
+            lower = anchor_center - anchor_bound
+            upper = anchor_center + anchor_bound
+            return torch.max(torch.min(anchors, upper), lower)
 
         if anchor_init == "grid":
-            return make_grid_anchors(num_points, anchor_bound)
+            return make_grid_anchors(num_points, anchor_bound) + anchor_center
         if anchor_init == "random":
-            return torch.empty(num_points, 3).uniform_(-anchor_bound, anchor_bound)
+            return torch.empty(num_points, 3).uniform_(-anchor_bound, anchor_bound) + anchor_center
         raise ValueError("anchor_init must be 'grid' or 'random'")
 
 

@@ -53,11 +53,21 @@ class Encoder2D(nn.Module):
 
 
 class DVGSNet(nn.Module):
-    def __init__(self, in_channels=1, base_channels=64, num_points=10000, img_size=512):
+    def __init__(
+            self,
+            in_channels=1,
+            base_channels=64,
+            num_points=10000,
+            img_size=512,
+            fc_hidden_dim=4096,
+            fc_rank=1024,
+    ):
         super(DVGSNet, self).__init__()
         self.encoder = Encoder2D(in_channels, base_channels)
         self.base_channels = base_channels
         self.num_points = num_points
+        self.fc_hidden_dim = fc_hidden_dim
+        self.fc_rank = fc_rank
 
         # 计算编码器输出特征图的空间尺寸
         H_transform = self.compute_encoder_output_size(img_size)
@@ -73,11 +83,23 @@ class DVGSNet(nn.Module):
 
         # 全连接层
         fc_input_dim = base_channels * 16 * H_transform * W_transform
-        self.fc_layers = nn.Sequential(
-            nn.Linear(fc_input_dim, 4096),
-            nn.ReLU(),
-            nn.Linear(4096, self.num_points * self.num_properties)
-        )
+        fc_output_dim = self.num_points * self.num_properties
+        if fc_rank is None:
+            self.fc_layers = nn.Sequential(
+                nn.Linear(fc_input_dim, fc_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(fc_hidden_dim, fc_output_dim)
+            )
+        else:
+            if fc_rank <= 0:
+                raise ValueError("fc_rank must be a positive integer or None")
+            self.fc_layers = nn.Sequential(
+                nn.Linear(fc_input_dim, fc_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(fc_hidden_dim, fc_rank),
+                nn.ReLU(),
+                nn.Linear(fc_rank, fc_output_dim)
+            )
 
         # 定义激活函数
         self.density_inverse_activation = inverse_softplus

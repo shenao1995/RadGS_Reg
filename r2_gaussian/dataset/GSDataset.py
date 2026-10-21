@@ -170,7 +170,9 @@ class GSDataset(Dataset):
         images_and_camera_poses["input_imgs"].append(la_resized)
         images_and_camera_poses["sample_name"].append(scene.model_path)
         images_and_camera_poses["vol_gts"].append(scene.vol_gt)
-
+        # ct_resized = self.ct_resize_transform(scene.vol_gt.unsqueeze(0))
+        # ct_oriented = self.orient_transform(scene.vol_gt.unsqueeze(0))
+        # images_and_camera_poses["vol_gts"].append(scene.vol_gt.unsqueeze(0))
         # 遍历选择的相机，填充字典
         for camera in selected_cameras:
             # 获取图像
@@ -183,7 +185,7 @@ class GSDataset(Dataset):
             images_and_camera_poses["camera_centers"].append(camera.camera_center)
             images_and_camera_poses["FovX"].append(camera.FoVx)
             images_and_camera_poses["FovY"].append(camera.FoVy)
-
+        # print(self.pcs_path)
         # 加载并处理 'gt' 数据
         # if self.pcs_path:
         ply_path = self.pcs_path[index]

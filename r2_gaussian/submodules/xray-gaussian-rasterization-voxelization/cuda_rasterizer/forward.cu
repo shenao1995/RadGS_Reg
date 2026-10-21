@@ -14,7 +14,7 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
-
+# define M_PI 3.14159265358979323846
 // Forward method for converting the input spherical harmonics
 // coefficients of each Gaussian to a simple RGB color.
 // We do not need SH anymore
