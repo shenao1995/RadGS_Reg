@@ -1,338 +1,186 @@
 <div align="center">
 
-<p align="center"> <img src="assets/logo.png" width="250px"> </p>
+<img src="assets/logo.png" width="250" alt="RadGS-Reg logo">
 
-[![project](https://img.shields.io/badge/project-homepage-green)](https://shenao1995.github.io/RadGS-Reg-Homepage/)
-[![paper](https://img.shields.io/badge/paper-miccai-blue)](https://link.springer.com/chapter/10.1007/978-3-032-05114-1_44)
+[![Project](https://img.shields.io/badge/project-homepage-green)](https://shenao1995.github.io/RadGS-Reg-Homepage/)
+[![Paper](https://img.shields.io/badge/paper-MICCAI-blue)](https://link.springer.com/chapter/10.1007/978-3-032-05114-1_44)
 
-<h2>RadGS-Reg: Registering Spine CT with Biplanar X-rays via Joint 3D Radiative Gaussians Reconstruction and 3D/3D Registration</h2>
+<h2>RadGS-Reg: Registering Spine CT with Biplanar X-Rays via Joint 3D Radiative Gaussians Reconstruction and 3D/3D Registration</h2>
 
-Vertebral-level CT/X-ray registration through joint 3D Radiative Gaussians reconstruction and 3D/3D registration.
-
-![cover](assets/pipeline.jpg)
-
-![reconstruction demo](assets/recon_results1.gif)
-
-![registration demo](assets/reg_results.gif)
+![Pipeline](assets/pipeline.jpg)
 
 </div>
 
-## Introduction
+## 📰 News
 
-This repository contains the code used for RadGS-based vertebral reconstruction from biplanar X-rays/DRRs. The current README documents the reconstruction stage, including dataset generation, RadGS attribute prediction, volume querying, and reconstruction evaluation. The 3D/3D registration stage is still being organized and will be documented later.
+- **2026.10.22:** We have fixed the RecM code and will upload the model and dataset to Hugging Face.
+- **2026.01.30:** Code and data have been released.
+- **2025.09.21:** Our work has been accepted to MICCAI 2025 **ORAL**!
 
-The reconstruction network predicts per-Gaussian attributes from two input projections:
+## 📖 Introduction
 
-- `xyz`
-- `scaling`
-- `rotation`
-- `density`
+RadGS-Reg is a framework for vertebral-level CT/X-ray registration that combines 3D Radiative Gaussians reconstruction from biplanar X-rays with 3D/3D registration.
 
-The predicted RadGS representation can be rendered into X-ray projections with `net_render` and queried into a voxel volume with `net_query`.
+If you find this repo useful, please give it a star ⭐ and consider citing our paper.
 
-## 1. Installation
+## 🛠️ Installation
 
-The CUDA rasterizer/voxelizer and `simple-knn` submodules follow the installation style of [R2-Gaussian](https://github.com/Ruyi-Zha/r2_gaussian). A working CUDA-enabled PyTorch environment is required.
+Clone the repository:
 
-### 1.1 Create environment
-
-```sh
-conda create -n r2_gaussian python=3.9 -y
-conda activate r2_gaussian
-
-# Choose the PyTorch/CUDA version that matches your machine.
-# The following is the upstream R2-Gaussian example for CUDA 11.8.
-pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+```bash
+git clone --recursive https://github.com/shenao1995/RadGS_Reg.git
+cd RadGS_Reg
 ```
 
-Install the Python packages used by this project:
+### 🐍 Reconstruction Environment
 
-```sh
-pip install monai SimpleITK opencv-python scikit-learn plyfile open3d diffdrr tensorboard matplotlib imageio pyvista pyyaml
+Use Linux with an NVIDIA GPU and a CUDA 11.8 toolkit.
+
+```bash
+conda create -n radgs python=3.11 pip -y
+conda activate radgs
+
+pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 \
+  --index-url https://download.pytorch.org/whl/cu118
+pip install numpy==1.26.4 monai==1.3.2 SimpleITK opencv-python-headless \
+  scikit-learn scikit-image plyfile open3d tensorboard tensorboardX \
+  matplotlib imageio pyvista pyyaml torchinfo "moviepy<2" pandas tqdm ninja
 ```
 
-### 1.2 Build R2-Gaussian submodules
+Install the CUDA extensions and their source dependencies:
 
-Clone/update submodules first:
+```bash
+git clone https://gitlab.inria.fr/bkerbl/simple-knn.git \
+  r2_gaussian/submodules/simple-knn
+git clone --branch 0.9.9.8 https://github.com/g-truc/glm.git \
+  r2_gaussian/submodules/xray-gaussian-rasterization-voxelization/third_party/glm
 
-```sh
-git submodule update --init --recursive
+pip install --no-build-isolation -e r2_gaussian/submodules/simple-knn
+pip install --no-build-isolation -e r2_gaussian/submodules/xray-gaussian-rasterization-voxelization
 ```
 
-Then compile the CUDA extensions:
+### 🩻 Data Generation Environment
 
-```sh
-pip install -e r2_gaussian/submodules/simple-knn
-pip install -e r2_gaussian/submodules/xray-gaussian-rasterization-voxelization
+Create a separate environment for NanoDRR:
+
+```bash
+conda create -n nanodrr python=3.11 pip -y
+conda activate nanodrr
+
+pip install torch==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+pip install "numpy==1.26.4" SimpleITK torchio plyfile Pillow \
+  "nanodrr @ git+https://github.com/eigenvivek/nanodrr.git@f10354191f1e511cadee5d7cd4fc8ad05f5964c4"
 ```
 
-On Windows, install Visual Studio Build Tools and a CUDA toolkit compatible with the installed PyTorch version. If the build toolchain cannot be found, run the command prompt with the Visual Studio environment or set:
+## 🚀 Running
 
-```bat
-SET DISTUTILS_USE_SDK=1
+### 🧩 Reconstruction
+
+Place the prepared dataset in `data/vertebra_dataset`. Provide `splits/train.txt`, `splits/val.txt`, and `splits/test.txt`, each listing sample filenames relative to that directory. Keep all vertebrae from the same CT in one split.
+
+Activate the reconstruction environment:
+
+```bash
+conda activate radgs
 ```
 
-R2-Gaussian also provides a Conda/environment-file based installation and optional TIGRE installation for its original data generation and initialization tools. See the upstream [R2-Gaussian README](https://github.com/Ruyi-Zha/r2_gaussian) for more details.
+#### 🏋️ Training
 
-## 2. Dataset
+Single GPU:
 
-The reconstruction code uses one `*.pickle` file and one `*.ply` file for each vertebra case.
-
-```text
-G:/GS_DATA/vertebra_dataset/
-  0001_L1.pickle
-  0001_L1.ply
-  0002_L2.pickle
-  0002_L2.ply
-  ...
+```bash
+python gs_train.py \
+  --data-dir data/vertebra_dataset \
+  --output-dir outputs/RecM \
+  --epochs 150
 ```
 
-The `*.pickle` file stores the CT volume, scanner geometry, projection angles, and generated DRRs. The current generator writes fields such as:
+Alternatively, train on eight GPUs:
 
-```text
-numTrain, numVal
-DSD, DSO
-nDetector, dDetector
-nVoxel, dVoxel
-offOrigin, offDetector
-mode, totalAngle, startAngle
-image
-train.angles, train.projections
-val.angles, val.projections
+```bash
+torchrun --standalone --nproc_per_node=8 gs_train.py \
+  --data-dir data/vertebra_dataset \
+  --output-dir outputs/RecM \
+  --epochs 150
 ```
 
-The companion `*.ply` file stores sampled 3D points from the foreground CT voxels. `GSDataset.py` reads the PLY coordinates directly as `gt_gs`; no extra coordinate normalization is applied in the dataset or renderer.
+Monitor training with TensorBoard:
 
-During training, `GSDataset.py` uses two projections as network input:
-
-- AP-like view: `viewpoint_stack[24]`
-- lateral-like view: `viewpoint_stack[0]`
-
-All generated views are still used as projection supervision through `render_imgs`.
-
-## 3. Generate Reconstruction Data
-
-The data generation entry is `data_generation.py`. It uses DiffDRR to generate DRRs from cropped vertebra CT volumes and writes the NAF-style `*.pickle` files used by the reconstruction pipeline.
-
-Before generation, edit these paths in `generate_net_data()`:
-
-```python
-vert_fold = "F:/BaiduNetdiskDownload/total_preprocess/resampled_vert"
-out_fold = "F:/BaiduNetdiskDownload/total_preprocess/vertebra_dataset"
-drr_save_fold = "data/drr_data"
+```bash
+tensorboard --logdir outputs/RecM/tensorboard
 ```
 
-Also check the filename filter:
+#### 📊 Evaluation
 
-```python
-if "0" not in file:
+Evaluate a trained checkpoint on the test split:
+
+```bash
+python -m scripts.evaluate_reconstruction \
+  --checkpoint outputs/RecM/best_detail.pth \
+  --data-dir data/vertebra_dataset \
+  --split test \
+  --output-dir outputs/RecM_eval
 ```
 
-This filter skips any filename containing `0`. Remove or modify it if you want to process every CT file.
+#### 🔍 Inference
 
-The default geometry in `data_generation.py` is:
+Reconstruct and export volumes:
 
-```text
-SDD = 1100.0
-DSO = 800.0
-detector size = 256 x 256
-detector spacing = 1.2 mm
-numTrain = 50
-numVal = 50
-totalAngle = 180 degrees
-```
-
-Run:
-
-```sh
-python -c "from data_generation import generate_net_data; generate_net_data()"
-```
-
-For each input CT, the script saves:
-
-- `<case>.pickle`: volume, scanner parameters, train/val DRRs
-- `<case>.ply`: foreground point cloud sampled from CT voxels
-- optional DRR preview PNGs in `drr_save_fold`
-
-## 4. Running Reconstruction
-
-### 4.1 Training
-
-Set the dataset folder in `gs_train.py`:
-
-```python
-data_fold = "G:/GS_DATA/vertebra_dataset"
-```
-
-The current training configuration is:
-
-```text
-input views = 2
-image size = 128 x 128
-batch size = 4
-num_points = 10000
-base_channels = 32
-fc_rank = 1024
-optimizer = Adam, lr = 1e-5
-scheduler = StepLR(step_size=20, gamma=0.5)
-```
-
-The loss combines:
-
-```text
-L1 projection loss
-DSSIM projection loss
-Chamfer loss on xyz
-volume L1 loss from net_query
-```
-
-Current weights:
-
-```text
-lambda_dssim = 0.2
-chamfer_weight = 0.5
-lambda_vol = 0.05
-vol_loss_size = 48
-vol_loss_samples = 1
-```
-
-At the bottom of `gs_train.py`, enable the training entry:
-
-```python
-if __name__ == "__main__":
-    model_fold = "DVGSNet_vol_input128_wR_cd0.5"
-    log_dir = f"gs_model/{model_fold}"
-    tb_writer = net_output_and_logger(log_dir)
-    training(log_dir, tb_writer)
-```
-
-Then run:
-
-```sh
-python gs_train.py
-```
-
-Training saves:
-
-```text
-gs_model/<model_fold>/model1.pth
-gs_model/<model_fold>/train_loss.jpg
-gs_model/<model_fold>/train_ssim.jpg
-gs_model/<model_fold>/events.out.tfevents.*
-```
-
-### 4.2 Reconstruction Inference
-
-Use `gs_infer.py` to predict a volume from a trained model:
-
-```sh
+```bash
 python gs_infer.py \
-  --checkpoint gs_model/DVGSNet_vol_input128_wR_cd0.5/model1.pth \
-  --data-fold G:/GS_DATA/vertebra_dataset \
-  --output gs_model_output/vol_output
+  --checkpoint outputs/RecM/best_detail.pth \
+  --data-fold data/vertebra_dataset \
+  --output outputs/RecM_infer
 ```
 
-For a quick check:
+### 🧭 Registration
 
-```sh
-python gs_infer.py \
-  --checkpoint gs_model/DVGSNet_vol_input128_wR_cd0.5/model1.pth \
-  --data-fold G:/GS_DATA/vertebra_dataset \
-  --output gs_model_output/vol_output_check \
-  --max-cases 1 \
-  --no-npy
+### 🤝 Joint Training
+
+## 🩻 Generate Data
+
+Generate L1–L5 samples from paired CT volumes and segmentation masks using [NanoDRR](https://github.com/eigenvivek/nanodrr). For [CTSpine1K](https://huggingface.co/datasets/alexanderdann/CTSpine1K), labels 20–24 correspond to L1–L5.
+
+```bash
+conda activate nanodrr
+
+python data_generation.py \
+  --ct-dir data/raw_data/volumes \
+  --mask-dir data/raw_data/labels \
+  --out-dir data/vertebra_dataset \
+  --labels 20 21 22 23 24 \
+  --spacing-mm 1.0 \
+  --volume-size 128 \
+  --max-source-spacing-mm 1.0 \
+  --max-output-spacing-mm 1.0 \
+  --device cuda \
+  --backend triton
 ```
 
-`gs_infer.py` automatically infers the model configuration from the checkpoint and uses the same volume convention as training:
+Each sample contains 50 DRRs over `[0°, 180°)`, with AP and lateral views as inputs. Samples with original or generated voxel spacing greater than 1 mm are excluded. After generation, prepare the CT-level split files described in **Running**.
 
-```python
-net_query(gaussians, offOrigin, nVoxel, sVoxel)
+## 🙏 Acknowledgement
+
+We thank the authors of [R²-Gaussian](https://github.com/Ruyi-Zha/r2_gaussian), [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting), [NanoDRR](https://github.com/eigenvivek/nanodrr), [MONAI](https://github.com/Project-MONAI/MONAI), and [SimpleITK](https://github.com/SimpleITK/SimpleITK) for sharing their work.
+
+## 📄 License
+
+Third-party components retain their respective licenses, including the [Gaussian rasterizer and voxelizer license](r2_gaussian/submodules/xray-gaussian-rasterization-voxelization/LICENSE.md).
+
+## 📚 Citation
+
+If this repo helps you, please consider citing our work:
+
+```bibtex
+@inproceedings{shen2026radgsreg,
+  title={RadGS-Reg: Registering Spine CT with Biplanar X-Rays via Joint 3D Radiative Gaussians Reconstruction and 3D/3D Registration},
+  author={Shen, Ao and Fu, Xueming and Jiang, Junfeng and Zeng, Qiang and Tang, Ye and Chen, Zhengming and Nong, Luming and Wang, Feng and Zhou, Shaohua Kevin},
+  booktitle={Medical Image Computing and Computer Assisted Intervention -- MICCAI 2025},
+  series={Lecture Notes in Computer Science},
+  volume={15968},
+  pages={456--466},
+  year={2026},
+  publisher={Springer Nature Switzerland},
+  doi={10.1007/978-3-032-05114-1_44}
+}
 ```
-
-The GT volume is aligned with:
-
-```python
-torch.rot90(gt_volume, -2, dims=(-3, -2))
-```
-
-### 4.3 Evaluation
-
-During training, validation reports 2D reconstruction metrics:
-
-- mean 2D SSIM
-- mean 2D PSNR
-
-If TensorBoard logging is enabled, it also writes:
-
-```text
-val_images
-reconstruction/slice-gt_pred_diff
-val/vol_l1
-val/psnr_2d
-val/ssim_2d
-```
-
-Run TensorBoard with:
-
-```sh
-tensorboard --logdir gs_model
-```
-
-For post-training evaluation, `gs_infer.py` saves:
-
-```text
-gs_model_output/vol_output/
-  metrics.csv
-  nii/
-    <case>_pred.nii.gz
-    <case>_gt.nii.gz
-  npy/
-    <case>_pred.npy
-    <case>_gt.npy
-  slices/
-    <case>_slices.png
-```
-
-`metrics.csv` contains:
-
-```text
-sample
-vol_l1
-psnr_3d
-ssim_3d
-ssim_3d_x
-ssim_3d_y
-ssim_3d_z
-```
-
-Use `--save-render-gif` if you also want GIFs of predicted and GT projections:
-
-```sh
-python gs_infer.py \
-  --checkpoint gs_model/DVGSNet_vol_input128_wR_cd0.5/model1.pth \
-  --data-fold G:/GS_DATA/vertebra_dataset \
-  --output gs_model_output/vol_output \
-  --save-render-gif
-```
-
-## 5. Current Scope and TODO
-
-This README currently covers the reconstruction stage:
-
-```text
-cropped vertebra CT -> DRR/PLY dataset -> RadGS attribute prediction -> volume query/evaluation
-```
-
-The 3D/3D registration code and joint reconstruction-registration training protocol will be documented after the implementation is cleaned and stabilized.
-
-## 6. Acknowledgement, License, and Citation
-
-This project builds on ideas and code from:
-
-- [R2-Gaussian](https://github.com/Ruyi-Zha/r2_gaussian)
-- Gaussian Splatting
-- DiffDRR
-- MONAI
-- SimpleITK
-
-If you use this project, please cite the RadGS-Reg paper and the upstream projects that this code depends on.
