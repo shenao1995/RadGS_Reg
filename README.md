@@ -4,6 +4,7 @@
 
 [![Project](https://img.shields.io/badge/project-homepage-green)](https://shenao1995.github.io/RadGS-Reg-Homepage/)
 [![Paper](https://img.shields.io/badge/paper-MICCAI-blue)](https://link.springer.com/chapter/10.1007/978-3-032-05114-1_44)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-RecM-yellow?logo=huggingface)](https://huggingface.co/shenao1995/RadGS-Reg-RecM)
 
 <h2>RadGS-Reg: Registering Spine CT with Biplanar X-Rays via Joint 3D Radiative Gaussians Reconstruction and 3D/3D Registration</h2>
 
