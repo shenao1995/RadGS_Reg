@@ -61,8 +61,12 @@ class DVGSNet(nn.Module):
             img_size=512,
             fc_hidden_dim=4096,
             fc_rank=1024,
+            rotation_mode="unit",
     ):
         super(DVGSNet, self).__init__()
+        if rotation_mode not in {"unit", "legacy"}:
+            raise ValueError("rotation_mode must be unit or legacy")
+        self.rotation_mode = rotation_mode
         self.encoder = Encoder2D(in_channels, base_channels)
         self.base_channels = base_channels
         self.num_points = num_points
@@ -158,7 +162,16 @@ class DVGSNet(nn.Module):
         # )
 
         # 对旋转四元数进行规范化
-        rotations = self.rotation_activation(rotations)
+        if self.rotation_mode == "legacy":
+            # Exact historical behavior: normalize across points (dim=1).
+            # Only used for the explicitly recorded rotation ablation.
+            rotations = self.rotation_activation(rotations)
+        else:
+            rotation_norm = rotations.norm(dim=-1, keepdim=True)
+            rotations = self.rotation_activation(rotations, dim=-1, eps=1e-8)
+            identity = torch.zeros_like(rotations)
+            identity[..., 0] = 1.0  # CUDA operators expect wxyz.
+            rotations = torch.where(rotation_norm > 1e-8, rotations, identity)
 
         # 对 xyz 进行空间变换
         # 假设 xyz 的范围是 [0, 1]，需要调整到正确的体素索引范围

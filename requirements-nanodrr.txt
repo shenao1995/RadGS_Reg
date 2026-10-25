@@ -1,0 +1,8 @@
+# Separate generation environment: do not install over radgs/torch 2.1.2.
+# Install torch 2.6.0+cu124 from https://download.pytorch.org/whl/cu124 first.
+nanodrr @ git+https://github.com/eigenvivek/nanodrr.git@f10354191f1e511cadee5d7cd4fc8ad05f5964c4
+numpy==1.26.4
+SimpleITK==2.5.6
+torchio==1.2.1
+plyfile==1.1.3
+Pillow>=10

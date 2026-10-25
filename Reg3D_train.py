@@ -1,419 +1,232 @@
+"""Standalone RegM training: point-cloud rigid registration with CT or frozen RecM pairs.
+
+No synthetic output volume, independent split, CAL, Chamfer or volume-shape loss.
+The predicted SE(3) matrix rigidly resamples moving CT in physical millimetres.
+"""
+import argparse
+import json
+import math
 import os
+from pathlib import Path
+import random
+import shutil
+import time
+
 import numpy as np
-from sklearn.model_selection import KFold, train_test_split
-import csv
-import pandas as pd
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import monai
-from monai.losses import SSIMLoss
-from monai.data import create_test_image_3d, list_data_collate, decollate_batch, pad_list_data_collate
-from RegFormer3D import Reg3DFormer
-# from Reg3Donly import Reg3DFormer
-from ReconFormer import RecFormer
-from RecFormer_ResNet import RecResFormer
-from Reg3D_infer import inference_method
-from monai.transforms import (
-    Activations,
-    EnsureChannelFirstd,
-    SqueezeDimd,
-    AsDiscrete,
-    Compose,
-    LoadImaged,
-    Resized,
-    ScaleIntensityd,
-)
-from monai.visualize import plot_2d_or_3d_image
-import matplotlib.pyplot as plt
-from NCC3d import GNCCLoss3D, NormalizedCrossCorrelation3d
-from monai.metrics import SSIMMetric, PSNRMetric
-from r2_gaussian.utils.log_utils import net_output_and_logger
-from r2_gaussian.utils.plot_utils import show_two_slice, show_two_volume
-from sklearn.preprocessing import StandardScaler
-import pickle
+from torch.utils.tensorboard import SummaryWriter
+
+from networks.pointRegM import PointRegM, make_regm
+from tools.point_registration import point_volume_registration_loss
+from tools.registration_data import RegistrationDataset, prepare_pair
+from tools.registration_geometry import pose_matrix, pose_errors, warp_volume
+from tools.registration_losses import registration_loss, central_crop, ssim3d
+from tools.registration_augmentation import augment_fixed_input, jitter_fixed_input
 
 
-def model_engine():
-    fold_path = 'gs_model_output/vol_output_real'
-    pose_path = 'gs_model_output/pose_label.csv'
-    pose_data = pd.read_csv(pose_path)
-    mov_arr, fixed_arr = get_img_only(fold_path)
-    # mov_arr, fixed_arr, pose_arr = get_img_pose(fold_path, pose_data)
-    # SS = StandardScaler()
-    # pose_arr = SS.fit_transform(pose_arr)
-
-    # mov_train, mov_test, fixed_train, fixed_test, pose_train, pose_test = train_test_split(mov_arr, fixed_arr,
-    #                                                                                        pose_arr,
-    #                                                                                        test_size=0.2,
-    #                                                                                        random_state=4)
-    mov_train, mov_test, fixed_train, fixed_test = train_test_split(mov_arr, fixed_arr,
-                                                                    test_size=0.2,
-                                                                    random_state=15)
-    # train_files = [{"moving": Moving, "fixed": Fixed, "pose": Pose}
-    #                for Moving, Fixed, Pose in zip(mov_train, fixed_train, pose_train)]
-    # val_files = [{"moving": Moving, "fixed": Fixed, "pose": Pose}
-    #              for Moving, Fixed, Pose in zip(mov_test, fixed_test, pose_test)]
-    train_files = [{"moving": Moving, "fixed": Fixed}
-                   for Moving, Fixed in zip(mov_train, fixed_train)]
-    val_files = [{"moving": Moving, "fixed": Fixed}
-                 for Moving, Fixed in zip(mov_test, fixed_test)]
-    model_fold = 'Recon_model8'
-    log_dir = 'reg_model/{}'.format(model_fold)
-    # tb_writer = net_output_and_logger(log_dir)
-    # pickle.dump(SS, open('reg_model/{}/pose_scaler.pkl'.format(model_fold), 'wb'))
-    # training(train_files, val_files, log_dir, tb_writer)
-    inference_method(val_files, log_dir)
+def atomic_json(path,value):
+    path=Path(path);tmp=path.with_suffix(path.suffix+'.tmp');tmp.write_text(json.dumps(value,indent=2));tmp.replace(path)
 
 
-def get_img_only(data_path):
-    mov_fold = 'gs_model_output/vol_output_mov'
-    moving_list = []
-    fixed_list = []
-    for fixed in os.listdir(data_path):
-        if 'pred' in fixed:
-            fixed_list.append(os.path.join(data_path, fixed))
-            # moving_list.append(os.path.join(mov_fold, fixed.replace('gt', 'mov')))
-            moving_list.append(os.path.join(data_path, fixed.replace('pred', 'gt')))
-    print(len(moving_list), len(fixed_list))
-    return np.array(moving_list), np.array(fixed_list)
+def atomic_save(path,value):
+    path=Path(path);tmp=path.with_suffix(path.suffix+'.tmp');torch.save(value,tmp);tmp.replace(path)
 
 
-def get_img_pose(data_path, pose_pd):
-    mov_fold = 'gs_model_output/vol_output_mov'
-    moving_list = []
-    fixed_list = []
-    pose_list = []
-    for index, row in pose_pd.iterrows():
-        name = row['image_id']
-        fixed_list.append(os.path.join(data_path, name.replace('mov', 'gt')))
-        moving_list.append(os.path.join(mov_fold, name))
-        pose_list.append([float(row['inv_rotZ_deg']), float(row['inv_rotY_deg']), float(row['inv_rotX_deg']),
-                          float(row['inv_transZ_mm'] / 4), float(row['inv_transY_mm'] / 4),
-                          float(row['inv_transX_mm'] / 4)])
-
-    # for fixed in os.listdir(data_path):
-    #     if 'pred' in fixed and os.path.exists(os.path.join(mov_fold, fixed.replace('gt', 'mov'))):
-    #         fixed_list.append(os.path.join(data_path, fixed))
-    #         moving_list.append(os.path.join(mov_fold, fixed.replace('gt', 'mov')))
-    # print(len(moving_list), len(fixed_list))
-    return np.array(moving_list), np.array(fixed_list), np.array(pose_list)
+def seed_everything(seed):
+    random.seed(seed);np.random.seed(seed);torch.manual_seed(seed);torch.cuda.manual_seed_all(seed)
 
 
-def training(train_files, val_files, model_dir, tensorboard_writer, StdS=None):
-    keys = ["moving", "fixed"]
-    img_size = 64
-    # 训练集预处理
-    train_transforms = Compose(
-        [
-            LoadImaged(keys=keys, ensure_channel_first=True, image_only=False),
-            # CropForegroundd(keys=keys, source_key="img"),
-            # 尺寸归一化
-            Resized(keys=keys, spatial_size=(img_size, img_size, img_size), mode='trilinear',
-                    align_corners=True),
-            # 像素归一化
-            # ConvertToMultiVertebraClassesd(keys="seg"),
-            ScaleIntensityd(keys=keys),
-            # CropForegroundd(keys=keys, source_key="img"),
-            # RandScaleIntensityd(keys=keys[:-1], factors=0.1, prob=0.5),
-            # RandRotated(keys=keys, range_z=np.pi / 6, prob=0.2, keep_size=True),
-            # RandRotate90d(keys=keys, prob=0.2, spatial_axes=(0, 1)),
-            # RandFlipd(keys=keys, spatial_axis=0, prob=0.2),
-            # RandZoomd(keys=keys, min_zoom=0.6, max_zoom=1.2, prob=0.2),
-        ]
-    )
-    # 验证集预处理
-    val_transforms = Compose(
-        [
-            LoadImaged(keys=keys, ensure_channel_first=True, image_only=False),
-            Resized(keys=keys, spatial_size=(img_size, img_size, img_size), mode='trilinear',
-                    align_corners=True),
-            ScaleIntensityd(keys=keys),
-            # ScaleIntensityd(keys="dis"),
-            # NormalizeIntensityd(keys=keys[:-1]),
-            # ConcatItemsd(keys=keys[:-1], name="inputs"),
-        ]
-    )
-    # create a training data loader
-    # 加载训练集
-    batch_size = 8
-    train_ds = monai.data.CacheDataset(data=train_files, transform=train_transforms, num_workers=2)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-        collate_fn=list_data_collate
-    )
-    # create a validation data loader
-    # 加载测试集
-    val_ds = monai.data.CacheDataset(data=val_files, transform=val_transforms, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, num_workers=2, collate_fn=list_data_collate)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # 单卡训练
-    # model = RecFormer(
-    #     in_channels=2,
-    #     out_channels=1,
-    #     img_size=img_size,
-    #     feature_size=16,
-    #     hidden_size=768,
-    #     mlp_dim=3072,
-    #     num_heads=12,
-    #     proj_type="perceptron",
-    #     norm_name="instance",
-    #     res_block=True,
-    # ).to(device)
-    model = RecResFormer(
-        in_channels=2,
-        out_channels=1,
-        spatial_dims=3
-    ).to(device)
-    # model = Reg3DFormer(
-    #     in_channels=2,
-    #     spatial_dims=3
-    # ).to(device)
-
-    # DCE_loss = DiceCELoss(sigmoid=True)
-    MSE_loss = torch.nn.MSELoss()
-    NCC_loss = NormalizedCrossCorrelation3d()
-    Dice_loss = Reg_DiceLoss()
-    SSIM_loss = SSIMLoss(spatial_dims=3)
-    ssim_metric = SSIMMetric(spatial_dims=3)
-    psnr_metric = PSNRMetric(max_val=1)
-    Centroid_loss = CentroidLoss()  # 新增重心损失
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 50, gamma=0.5, last_epoch=-1)
-    # start a typical PyTorch training
-    epoch_num = 200
-    # optimizer = torch.optim.Adam(model.parameters(), 0.1)
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epoch_num)
-    # 每隔2次验证一次
-    val_interval = 2
-    # 保存最佳的AUC
-    best_metric = 0
-    # 测试集dice最高时的epoch次数
-    best_metric_epoch = -1
-    # 用于保存训练集的loss
-    epoch_loss_values = []
-    # 用于保存测试集的loss
-    val_loss_list = []
-    # 用于保存每次验证时的Dice
-    metric_values = []
-    spacing = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float64).to(device)
-    # 训练循环
-    for epoch in range(epoch_num):
-        print("-" * 10)
-        print(f"epoch {epoch + 1}/{epoch_num}")
-        model.train()
-        epoch_loss = 0
-        step = 0
-        if epoch < epoch_num // 2:
-            # 前半部分训练，ssim_loss权重从1到0.5
-            weight_ssim = 1 - (epoch / (epoch_num // 2)) * 0.5  # 从1逐渐减小到0.5
-            weight_mse = 1 - weight_ssim  # 为MSE损失分配剩余的权重
-        else:
-            # 后半部分训练，ssim_loss权重从0.5逐渐减小到0
-            weight_ssim = 0.5 - ((epoch - epoch_num // 2) / (epoch_num // 2)) * 0.5  # 从0.5逐渐减小到0
-            weight_mse = 1 - weight_ssim  # 为MSE损失分配剩余的权重
-        for batch_data in train_loader:
-            step += 1
-            movings, fixeds = (
-                batch_data["moving"].to(device),
-                batch_data["fixed"].to(device),
-            )
-            # pose_gt = batch_data["pose"].to(device, dtype=torch.float32)
-            # recon_fixed, pose_params, transformed_movs = model(movings, fixeds, spacing, StdS)
-            # pose_params, transformed_movs = model(movings, fixeds, spacing, StdS)
-            recon_fixed = model(movings, fixeds)
-            # gt_transformed_movs = model.apply_rigid_transform(movings, pose_gt, spacing)
-            # show_two_volume(gt_transformed_movs.squeeze()[1], fixeds.squeeze()[1], axis=0)
-            # center_loss = Centroid_loss(transformed_movs, fixeds)
-            # pose_loss = MSE_loss(pose_gt, pose_params)
-            mse_loss = MSE_loss(recon_fixed, movings)
-            # dice_loss = Dice_loss(transformed_movs, fixeds)  # 计算Dice损失
-            ssim_loss = SSIM_loss(recon_fixed, movings)
-            # ncc_loss = NCC_loss(transformed_movs, fixeds).mean()
-            # total_loss = center_loss * 0.1 + ncc_loss * 0.2 + pose_loss
-            total_loss = mse_loss + ssim_loss * 0.2
-            # 损失回传
-            total_loss.backward()
-            optimizer.step()
-            epoch_loss += total_loss.item()
-            epoch_len = len(train_ds) // train_loader.batch_size
-            print(
-                f"{step}/{len(train_ds) // train_loader.batch_size + 1}, "
-                f"train_loss: {total_loss.item():.4f}, mse_loss: {mse_loss.item():.4f}, "
-                f"ssim_loss: {ssim_loss.item():.4f}")
-            # print(
-            #     f"{step}/{len(train_ds) // train_loader.batch_size + 1}, "
-            #     f"train_loss: {total_loss.item():.4f}, pose_loss: {pose_loss.item():.4f}")
-            tensorboard_writer.add_scalar("train/train_loss", total_loss.item(), epoch_len * epoch + step)
-
-        epoch_loss /= step
-        # scheduler.step()
-        epoch_loss_values.append(epoch_loss)
-        print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}")
-        # 开始验证测试集
-        if (epoch + 1) % val_interval == 0:
-            model.eval()
-            with torch.no_grad():
-                val_epoch_loss = 0
-                val_step = 0
-                for val_data in val_loader:
-                    val_step += 1
-                    val_movings, val_fixeds = (
-                        val_data["moving"].to(device),
-                        val_data["fixed"].to(device),
-                    )
-                    # val_recon_fixed, val_pose_params, val_transformed_movs = model(val_movings, val_fixeds, spacing, StdS)
-                    # val_pose_params, val_transformed_movs = model(val_movings, val_fixeds, spacing,
-                    #                                               StdS)
-                    val_recon_fixed = model(val_movings, val_fixeds)
-                    # val_ncc_loss = NCC_loss(val_transformed_movs, val_recon_fixed).mean()
-                    # val_mse_loss = MSE_loss(val_transformed_movs, val_recon_fixed)
-                    val_ssim_loss = SSIM_loss(val_recon_fixed, val_movings)
-                    val_mse_loss = MSE_loss(val_recon_fixed, val_movings)
-                    val_loss = val_ssim_loss + val_mse_loss
-                    val_epoch_loss += val_loss.item()
-                    val_epoch_len = len(val_ds) // val_loader.batch_size
-                    tensorboard_writer.add_scalar("train/val_loss", val_loss.item(), val_epoch_len * epoch + val_step)
-                    ssim_metric(y_pred=val_recon_fixed, y=val_movings)
-                    psnr_metric(y_pred=val_recon_fixed, y=val_movings)
-                val_epoch_loss /= val_step
-                val_loss_list.append(val_epoch_loss)
-                ssim_3d = ssim_metric.aggregate().item()
-                psnr_3d = psnr_metric.aggregate().item()
-                ssim_metric.reset()
-                psnr_metric.reset()
-                metric_values.append(ssim_3d)
-                tensorboard_writer.add_scalar(
-                    "val" + "/psnr_3d", psnr_3d, epoch + 1
-                )
-                tensorboard_writer.add_scalar(
-                    "val" + "/ssim_3d", ssim_3d, epoch + 1
-                )
-                if len(val_movings.squeeze().shape) != 4:
-                    val_transformed_cts_show = val_recon_fixed.squeeze().unsqueeze(0)
-                    val_rencon_cts_show = val_movings.squeeze().unsqueeze(0)
-                else:
-                    val_transformed_cts_show = val_recon_fixed.squeeze()
-                    val_rencon_cts_show = val_movings.squeeze()
-
-                val_epoch_loss += val_loss.item()
-                image_show_3d = np.concatenate(
-                    [
-                        show_two_slice(
-                            val_transformed_cts_show[0, ..., i],
-                            val_rencon_cts_show[0, ..., i],
-                            f"slice {i} gt",
-                            f"slice {i} pred",
-                            vmin=val_transformed_cts_show[0, ..., i].min(),
-                            vmax=val_transformed_cts_show[0, ..., i].max(),
-                            save=True,
-                        )
-                        # for i in np.linspace(0, 128, 7).astype(int)[1:-1]
-                        for i in np.linspace(0, val_rencon_cts_show[0, :].shape[2], 7).astype(int)[1:-1]
-                    ],
-                    axis=0,
-                )
-                image_show_3d = torch.from_numpy(image_show_3d)[None].permute([0, 3, 1, 2])
-                tensorboard_writer.add_images(
-                    "reconstruction/slice-gt_pred_diff",
-                    image_show_3d,
-                    global_step=epoch,
-                )
-                if ssim_3d >= best_metric:
-                    best_metric = ssim_3d
-                    best_metric_epoch = epoch + 1
-                    torch.save(model.state_dict(), os.path.join(model_dir, 'model1.pth'))
-                    print("saved new best metric sed_model")
-                print(
-                    f"current epoch: {epoch + 1} current mean ssim: {ssim_3d:.4f}"
-                    f" current mean psnr: {psnr_3d:.4f}"
-                    f"\nbest mean ssim: {best_metric:.4f} "
-                    f"at epoch: {best_metric_epoch}"
-                )
-    print(
-        f"train completed, best_metric: {best_metric:.4f} "
-        f"at epoch: {best_metric_epoch}")
-    # writer.close()
-    # 绘制损失值曲线
-    plt.title("Epoch Average Loss")
-    x = [i + 1 for i in range(len(epoch_loss_values))]
-    y = epoch_loss_values
-    val_x = [val_interval * (i + 1) for i in range(len(val_loss_list))]
-    val_y = val_loss_list
-    plt.xlabel('Epoch')
-    plt.plot(x, y)
-    plt.plot(val_x, val_y)
-    plt.legend(['Training Loss', 'Validation Loss'])
-    # 保存曲线图像
-    plt.savefig(os.path.join(model_dir, 'train_loss.jpg'), dpi=300)
-    plt.close()
-    # 绘制测试集的Dice训练次数的关系曲线
-    plt.title("Val Mean SSIM")
-    x = [val_interval * (i + 1) for i in range(len(metric_values))]
-    y = metric_values
-    plt.xlabel("epoch")
-    plt.plot(x, y)
-    # plt.legend()
-    # 保存曲线图像
-    plt.savefig(os.path.join(model_dir, 'train_ssim.jpg'), dpi=300)
-    # plt.show()
+def checkpoint_model(path,device='cuda'):
+    state=torch.load(path,map_location='cpu')
+    # Early joint latest.pt files omitted the backbone label but contain both
+    # named model states and the explicit RegM constructor configuration.
+    legacy_joint=all(isinstance(state.get(key),dict) for key in ('recm','regm','regm_model_config'))
+    if state.get('backbone') not in ('point_residual34',) and not (state.get('backbone') is None and legacy_joint):
+        raise ValueError('Expected a point RegM checkpoint')
+    config=state['model_config'] if 'model_config' in state else state['regm_model_config']
+    weights=state['model'] if 'model' in state else state['regm']
+    model=make_regm(config).to(device);model.load_state_dict(weights,strict=True)
+    return model,state
 
 
-class Reg_DiceLoss(nn.Module):
-    def __init__(self, smooth=1e-5, threshold=0.0):
-        super(Reg_DiceLoss, self).__init__()
-        self.smooth = smooth
-        self.threshold = threshold  # 新增：阈值，用于二值化
-
-    def forward(self, pred, target):
-        # 对预测结果应用sigmoid函数，将其转化为概率
-        # pred = torch.sigmoid(pred)
-
-        # 二值化：根据阈值0.5将预测值转为0或1
-        pred = (pred > self.threshold).float()
-        target = (target > self.threshold).float()  # 同样二值化目标值
-        # show_two_volume(pred.squeeze()[0], target.squeeze()[0], axis=0)
-
-        intersection = torch.sum(pred * target)
-        dice_score = (2. * intersection + self.smooth) / (torch.sum(pred) + torch.sum(target) + self.smooth)
-        return 1 - dice_score  # 返回Dice损失
+def summarize_rows(rows):
+    keys=[k for k in rows[0] if k!='name']
+    return {k:float(np.mean([r[k] for r in rows])) for k in keys}
 
 
-def compute_centroid(img):
-    """ 计算 3D 图像的重心，梯度可传播 """
-    B, C, D, H, W = img.shape
-
-    z = torch.arange(D, device=img.device).view(1, 1, D, 1, 1).expand(B, C, D, H, W)
-    y = torch.arange(H, device=img.device).view(1, 1, 1, H, 1).expand(B, C, D, H, W)
-    x = torch.arange(W, device=img.device).view(1, 1, 1, 1, W).expand(B, C, D, H, W)
-
-    sum_intensity = torch.sum(img, dim=(2, 3, 4), keepdim=True) + 1e-5
-    centroid_x = torch.sum(x * img, dim=(2, 3, 4), keepdim=True) / sum_intensity
-    centroid_y = torch.sum(y * img, dim=(2, 3, 4), keepdim=True) / sum_intensity
-    centroid_z = torch.sum(z * img, dim=(2, 3, 4), keepdim=True) / sum_intensity
-
-    return torch.cat([centroid_x, centroid_y, centroid_z], dim=1).squeeze(-1).squeeze(-1).squeeze(-1)
-
-
-class CentroidLoss(nn.Module):
-    def __init__(self, img_size=(64, 64, 64)):
-        super(CentroidLoss, self).__init__()
-        self.max_dist = torch.sqrt(torch.tensor(img_size[0]**2 + img_size[1]**2 + img_size[2]**2))  # 计算最大可能的欧氏距离
-
-    def forward(self, pred, target):
-        centroid_pred = compute_centroid(pred)  # [B, 3]
-        centroid_target = compute_centroid(target)  # [B, 3]
-
-        euclidean_distance = torch.norm(centroid_pred - centroid_target, dim=1)  # [B]
-        # centroid_loss = euclidean_distance / self.max_dist.to(pred.device)  # 归一化到 0-1
-
-        return euclidean_distance.mean()  # 取 batch 平均
+@torch.no_grad()
+def evaluate(model,loader,device,affine,args,fixed_mode='rec',writer=None,epoch=0):
+    model.eval();rows=[]
+    for step,batch in enumerate(loader):
+        moving,fixed,truth=prepare_pair(batch,device,affine,fixed_mode=fixed_mode)
+        with torch.autocast(device_type='cuda',dtype=torch.bfloat16,enabled=args.amp):
+            pose=model(moving,fixed)
+        matrix=pose_matrix(pose.float());warped=warp_volume(moving,matrix,affine,affine)
+        errors=pose_errors(matrix,truth,batch['landmarks'].to(device))
+        errors['aligned_ssim3d']=ssim3d(central_crop(warped,64),central_crop(fixed,64),window=7)
+        canonical=batch['canonical'].to(device)
+        errors['aligned_to_ct_ssim3d']=ssim3d(central_crop(warped,64),central_crop(canonical,64),window=7)
+        for i,name in enumerate(batch['name']):
+            rows.append(dict(name=name,**{key:float(value[i]) for key,value in errors.items()}))
+        if writer is not None and step==0:
+            for tag,value in [('fixed',fixed),('moving',moving),('warped',warped),('canonical',canonical),('abs_error',(warped-fixed).abs())]:
+                # Same fixed physical window for all panels and all epochs.
+                img=value[0,0,:,:,value.shape[-1]//2].float().clamp(0,.04)/.04
+                writer.add_image(f'val/{tag}_RAS_axial',img[None],epoch)
+    return summarize_rows(rows),rows
 
 
-if __name__ == '__main__':
-    model_engine()
+def train(args):
+    if not args.fixed_input_blur_mm or any(not math.isfinite(value) or value<0 for value in args.fixed_input_blur_mm):
+        raise ValueError('Fixed-input blur sigmas must be finite and nonnegative')
+    if any(not math.isfinite(value) or value<0 for value in (args.fixed_input_rotation_noise_deg,args.fixed_input_translation_noise_mm)):
+        raise ValueError('Fixed-input pose noise must be finite and nonnegative')
+    out=Path(args.output_dir);out.mkdir(parents=True,exist_ok=True)
+    if not torch.cuda.is_available():raise RuntimeError('RegM training requires CUDA; submit a GPU job')
+    torch.set_num_threads(args.cpu_threads);torch.cuda.set_device(0);seed_everything(args.seed)
+    torch.backends.cudnn.allow_tf32=True;torch.backends.cuda.matmul.allow_tf32=True
+    device=torch.device('cuda')
+    train_ds=RegistrationDataset(args.data_dir,'train',args.limit_train)
+    val_ds=RegistrationDataset(args.data_dir,'val',args.limit_val)
+    generator=torch.Generator().manual_seed(args.seed)
+    options=dict(batch_size=args.batch_size,num_workers=args.workers,pin_memory=True)
+    if args.workers:options.update(persistent_workers=True,prefetch_factor=2)
+    train_loader=DataLoader(train_ds,shuffle=True,generator=generator,**options)
+    val_loader=DataLoader(val_ds,shuffle=False,**options)
+    affine=train_ds.affine.to(device)
+    loaded=None
+    if args.init or args.resume:
+        model,loaded=checkpoint_model(args.resume or args.init,device)
+    else:
+        model=PointRegM(input_size=96).to(device)
+    if not args.resume:
+        del loaded
+    optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=args.weight_decay)
+    scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,args.epochs,eta_min=args.lr*.05)
+    start=0;best=math.inf;global_step=0
+    if args.resume:
+        state=loaded;optimizer.load_state_dict(state['optimizer']);scheduler.load_state_dict(state['scheduler'])
+        start=state['epoch'];global_step=state['global_step'];best=state['best_score']
+        generator.set_state(state['loader_rng']);torch.set_rng_state(state['torch_rng']);torch.cuda.set_rng_state(state['cuda_rng'])
+        np.random.set_state(state['numpy_rng']);random.setstate(state['python_rng'])
+        # A continuation in a new output directory retains the already achieved
+        # best checkpoint even if no later validation improves it.
+        source_dir=Path(args.resume).resolve().parent
+        if source_dir!=out.resolve():
+            for filename in ('best.pth','best_validation.json','best_validation_cases.json'):
+                source=source_dir/filename;destination=out/filename
+                if source.is_file() and not destination.exists():shutil.copy2(source,destination)
+        previous_total=state['config']['epochs']
+        if args.epochs<start:raise ValueError('Requested total epochs precedes the resume checkpoint')
+        if args.epochs>previous_total:
+            # An authorized extension gets its own cosine period. Loading the old
+            # T_max would otherwise make the LR rise again after the old endpoint.
+            for group in optimizer.param_groups:group['lr']=args.lr;group['initial_lr']=args.lr
+            scheduler=torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,args.epochs-start,eta_min=args.lr*.05)
+    config=dict(vars(args),backbone='point_residual34',model_config=model.config,
+                geometry_precision='float32 physical matrices/grids with TF32 disabled locally; encoder precision unchanged',
+                residual_depths=[3,4,6,3],parameters=sum(p.numel() for p in model.parameters()),
+                train_count=len(train_ds),val_count=len(val_ds),protocol=train_ds.protocol,
+                pose_units='axis-angle rad + RAS mm; active moving -> fixed; inverse map for sampling',
+                selection='validation maximum of six per-axis MAEs / target (1mm or 1degree); test never used for checkpoint selection',
+                image_loss='NCC + true 3D Gaussian SSIM(7^3) on central 128mm cube of 192mm canvas; fixed range .04',
+                geodesic='SO(3) angle/(5deg) + Euclidean translation/(10mm)',
+                augmentation='new bounded known pose per training case and epoch; fixed known val/test poses',
+                fixed_input_quality_augmentation=dict(sigmas_mm=args.fixed_input_blur_mm,training_only=True,
+                    image_loss_uses_original_fixed=True,validation_and_inference_unmodified=True),
+                fixed_input_pose_noise=dict(rotation_each_axis_deg=args.fixed_input_rotation_noise_deg,
+                    translation_each_axis_mm=args.fixed_input_translation_noise_mm,training_only=True,
+                    moving_CT_and_true_pose_unmodified=True,image_loss_uses_original_fixed=True),
+                compute=dict(gpu=torch.cuda.get_device_name(0),torch=torch.__version__,amp_bfloat16=args.amp))
+    atomic_json(out/'config.json',config)
+    history_path=out/'history.jsonl';started=time.time()
+    with SummaryWriter(str(out/'tensorboard'),purge_step=start if args.resume else None) as writer:
+        for epoch in range(start+1,args.epochs+1):
+            model.train();totals={};seen=0;epoch_start=time.time()
+            for step,batch in enumerate(train_loader):
+                moving,fixed,truth=prepare_pair(batch,device,affine,epoch=epoch,augment=not args.static_train,
+                    seed=args.seed,fixed_mode=args.fixed_mode,curriculum_epochs=args.curriculum_epochs)
+                fixed_input,blur_sigma=augment_fixed_input(fixed,train_ds.protocol['cached_spacing_mm'],args.fixed_input_blur_mm)
+                fixed_input,_=jitter_fixed_input(fixed_input,affine,args.fixed_input_rotation_noise_deg,args.fixed_input_translation_noise_mm)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(device_type='cuda',dtype=torch.bfloat16,enabled=args.amp):pose=model(moving,fixed_input)
+                matrix=pose_matrix(pose.float());warped=warp_volume(moving,matrix,affine,affine)
+                loss,parts=point_volume_registration_loss(model,moving,fixed,affine,warped,fixed,matrix,truth,args,64,7)
+                if not torch.isfinite(loss):raise FloatingPointError('Nonfinite RegM loss')
+                loss.backward()
+                norm=torch.nn.utils.clip_grad_norm_(model.parameters(),args.grad_clip,error_if_nonfinite=True)
+                optimizer.step();global_step+=1;n=len(moving);seen+=n
+                for k,v in parts.items():totals[k]=totals.get(k,0.)+float(v)*n
+                if global_step%args.log_interval==0:
+                    for k,v in parts.items():writer.add_scalar(f'train/{k}',float(v),global_step)
+                    writer.add_scalar('train/gradient_norm',float(norm),global_step)
+                    writer.add_scalar('train/fixed_input_blur_sigma_mm',blur_sigma,global_step)
+                    heartbeat=dict(status='running',phase='train',epoch=epoch-1,current_epoch=epoch,epochs=args.epochs,
+                        step_in_epoch=step+1,steps_per_epoch=len(train_loader),global_step=global_step,
+                        elapsed_seconds=time.time()-started,best_validation_score=best if math.isfinite(best) else None,latest_train={k:float(v) for k,v in parts.items()})
+                    atomic_json(out/'progress.json',heartbeat)
+                    print(json.dumps(dict(event='train_progress',**heartbeat)),flush=True)
+            scheduler.step();values={f'train_{k}':v/seen for k,v in totals.items()}
+            record=dict(epoch=epoch,global_step=global_step,lr=scheduler.get_last_lr()[0],epoch_seconds=time.time()-epoch_start,**values)
+            writer.add_scalar('train/epoch_loss',values['train_loss'],epoch)
+            validation=None
+            if epoch%args.val_interval==0 or epoch==args.epochs or epoch==1:
+                # Always select against reconstructed fixed inputs, including clean-CT pretraining.
+                validation,rows=evaluate(model,val_loader,device,affine,args,writer=writer,epoch=epoch)
+                record['validation']=validation
+                for key,value in validation.items():writer.add_scalar(f'val/{key}',value,epoch)
+                pose_keys=[f'translation_{a}_mm' for a in 'xyz']+[f'rotation_{a}_deg' for a in 'xyz']
+                score=max(validation[k] for k in pose_keys)
+                if score<best:
+                    best=score
+                    atomic_save(out/'best.pth',dict(model=model.state_dict(),model_config=model.config,backbone='point_residual34',epoch=epoch,validation=validation,config=config))
+                    atomic_json(out/'best_validation.json',dict(epoch=epoch,score=score,metrics=validation))
+                    atomic_json(out/'best_validation_cases.json',rows)
+            with history_path.open('a') as f:f.write(json.dumps(record)+'\n')
+            print(json.dumps(record),flush=True)
+            state=dict(model=model.state_dict(),model_config=model.config,backbone='point_residual34',epoch=epoch,
+                optimizer=optimizer.state_dict(),scheduler=scheduler.state_dict(),global_step=global_step,best_score=best,
+                config=config,loader_rng=generator.get_state(),torch_rng=torch.get_rng_state(),cuda_rng=torch.cuda.get_rng_state(),numpy_rng=np.random.get_state(),python_rng=random.getstate())
+            atomic_save(out/'latest.pt',state)
+            atomic_json(out/'progress.json',dict(status='running' if epoch<args.epochs else 'completed',epoch=epoch,epochs=args.epochs,global_step=global_step,
+                elapsed_seconds=time.time()-started,best_validation_score=best,latest_validation=validation))
+            writer.flush()
+    return best
+
+
+def parse_args():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--data-dir',required=True);p.add_argument('--output-dir',required=True)
+    p.add_argument('--epochs',type=int,default=40);p.add_argument('--batch-size',type=int,default=8)
+    p.add_argument('--fixed-mode',choices=['ct','rec','curriculum'],default='curriculum');p.add_argument('--curriculum-epochs',type=int,default=10)
+    p.add_argument('--point-loss-weight',type=float,default=1.)
+    p.add_argument('--point-trim-fraction',type=float,default=.9)
+    p.add_argument('--lr',type=float,default=1e-4);p.add_argument('--weight-decay',type=float,default=1e-5)
+    p.add_argument('--geo-weight',type=float,default=.02);p.add_argument('--ssim-weight',type=float,default=1.);p.add_argument('--ncc-weight',type=float,default=1.)
+    p.add_argument('--workers',type=int,default=2);p.add_argument('--cpu-threads',type=int,default=2);p.add_argument('--seed',type=int,default=42)
+    p.add_argument('--val-interval',type=int,default=2);p.add_argument('--log-interval',type=int,default=20);p.add_argument('--grad-clip',type=float,default=5.)
+    p.add_argument('--amp',action=argparse.BooleanOptionalAction,default=True);p.add_argument('--static-train',action='store_true')
+    p.add_argument('--fixed-input-blur-mm',nargs='+',type=float,default=[0.],
+                   help='Training-only fixed encoder input blur: choose a listed physical sigma each batch; image loss/validation/inference use the original fixed field')
+    p.add_argument('--fixed-input-rotation-noise-deg',type=float,default=0.,
+                   help='Training-only reconstruction-input uncertainty, uniform per-axis degrees; never changes the true CT pose or image-loss target')
+    p.add_argument('--fixed-input-translation-noise-mm',type=float,default=0.,
+                   help='Training-only reconstruction-input uncertainty, uniform per-axis mm; validation/inference use original fields')
+    p.add_argument('--init');p.add_argument('--resume');p.add_argument('--limit-train',type=int,default=0);p.add_argument('--limit-val',type=int,default=0)
+    p.add_argument('--native-1mm-cache',action='store_true',help='Use audited native128 CT/RecM pairs, original1mm warp/image loss and optional single-node DDP')
+    p.add_argument('--input-size',type=int,choices=[96,192],default=None,help='Native-cache training only; preserve the checkpoint value when omitted')
+    p.add_argument('--max-train-steps',type=int,default=0,help='Limit native-cache training steps; checkpoints record partial_run')
+    p.add_argument('--max-val-steps',type=int,default=0,help='Limit native-cache training steps; checkpoints record partial_run')
+    return p.parse_args()
+
+
+if __name__=='__main__':
+    args=parse_args()
+    if args.native_1mm_cache:
+        from registration_native_train import train_native
+        train_native(args)
+    else:
+        if int(os.environ.get('WORLD_SIZE','1'))>1 or args.input_size is not None or args.max_train_steps or args.max_val_steps:
+            raise ValueError('Distributed/input-size/smoke options require --native-1mm-cache')
+        train(args)

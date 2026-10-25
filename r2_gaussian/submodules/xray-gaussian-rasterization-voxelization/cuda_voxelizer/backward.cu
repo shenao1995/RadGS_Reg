@@ -274,11 +274,11 @@ renderCUDA(
 		for (int i = 0; i < C; i++)
 			dL_dpixel[i] = dL_dpixels[i *  nVoxel_x * nVoxel_y * nVoxel_z + voxel_id];
 	
-	// Gradient of pixel coordinate w.r.t. normalized 
-	// screen-space viewport corrdinates (-1 to 1)
-	const float ddelx_dx = dVoxel_x;
-	const float ddely_dy = dVoxel_y;
-	const float ddelz_dz = dVoxel_z;
+	// Forward uses voxel = (scene - center + extent/2) / dVoxel.
+	// Its derivative w.r.t. scene coordinates is 1/dVoxel, not dVoxel.
+	const float ddelx_dx = 1.f / dVoxel_x;
+	const float ddely_dy = 1.f / dVoxel_y;
+	const float ddelz_dz = 1.f / dVoxel_z;
 
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK3D_SIZE)

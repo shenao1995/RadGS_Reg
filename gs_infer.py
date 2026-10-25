@@ -1,6 +1,7 @@
 import argparse
 import csv
 import glob
+import json
 import os
 import os.path as osp
 from pathlib import Path
@@ -13,16 +14,12 @@ import torch.nn.functional as F
 from monai.data import DataLoader, list_data_collate
 from sklearn.model_selection import train_test_split
 
-from DVGSNet import DVGSNet
+from networks.DVGSNet import DVGSNet
 from r2_gaussian.dataset.GSDataset import GSDataset
 from r2_gaussian.gaussian import net_query, net_render
 from r2_gaussian.utils.image_utils import metric_proj, metric_vol
 from r2_gaussian.utils.plot_utils import projs_to_gif, show_two_slice
-
-
-def align_gt_volume_to_query(gt_volume):
-    """Match the CT axis convention used by the training-time query loss."""
-    return torch.rot90(gt_volume, -2, dims=(-3, -2))
+from tools.data_contract import align_gt_volume_to_query, read_split_pairs
 
 
 def normalize_positive_volume(volume, eps=1e-6):
@@ -102,32 +99,67 @@ def build_model_from_checkpoint(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = unwrap_state_dict(checkpoint)
     model_config = infer_model_config(state_dict)
+    contract = {}
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("args"), dict):
+        contract = checkpoint["args"]
+    else:
+        config_path = osp.join(osp.dirname(osp.abspath(checkpoint_path)), "config.json")
+        if osp.isfile(config_path):
+            import json
+            with open(config_path) as handle:
+                contract = json.load(handle)
+    model_config["rotation_mode"] = contract.get("rotation_mode", "unit")
     model = DVGSNet(**model_config).to(device)
     model.load_state_dict(state_dict, strict=True)
+    model.training_contract = dict(contract)
+    model.input_scale = float(contract.get("input_scale", 1.0))
+    model.density_unit = float(contract.get("density_unit", 1.0))
     model.eval()
     return model, model_config
 
 
 def get_sample_name(sample_names, index, fallback):
-    if isinstance(sample_names, str):
-        value = sample_names
-    else:
-        value = sample_names[index]
-
-    while isinstance(value, (list, tuple)) and len(value) > 0:
+    value = sample_names
+    # MONAI collates the per-case [name] field into [[name0, name1, ...]].
+    while isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], (list, tuple)):
         value = value[0]
+    if isinstance(value, (list, tuple)):
+        value = value[index] if index < len(value) else fallback
+    while isinstance(value, (list, tuple)):
+        value = value[0] if value else fallback
+    name = Path(str(value) if value is not None else fallback).name
+    # A DICOM UID contains dots even after its .pickle suffix has been removed.
+    for suffix in (".nii.gz", ".pickle", ".pkl", ".nii", ".npy", ".json"):
+        if name.lower().endswith(suffix):
+            return name[:-len(suffix)]
+    return name
 
-    value = str(value) if value is not None else fallback
-    return Path(value).stem
 
-
-def write_volume(volume, save_path, spacing=None):
+def write_volume(volume, save_path, spacing=None, voxel_to_ras_mm=None):
     array = volume.detach().cpu().numpy().astype(np.float32)
-    image = sitk.GetImageFromArray(array)
-    if spacing is not None:
-        spacing = [float(item) for item in spacing.reshape(-1).detach().cpu().tolist()]
-        if len(spacing) == 3:
-            image.SetSpacing(spacing)
+    if voxel_to_ras_mm is not None:
+        # NanoDRR/query tensors are XYZ; SimpleITK arrays are ZYX and its world is LPS.
+        affine = np.asarray(voxel_to_ras_mm, dtype=np.float64)
+        if affine.shape != (4, 4) or not np.isfinite(affine).all():
+            raise ValueError("Expected a finite 4x4 voxel-to-RAS-mm affine")
+        lps_affine = np.diag([-1., -1., 1., 1.]) @ affine
+        voxel_spacing = np.linalg.norm(lps_affine[:3, :3], axis=0)
+        if (voxel_spacing <= 0).any():
+            raise ValueError("Voxel spacing must be positive")
+        direction = lps_affine[:3, :3] / voxel_spacing[None, :]
+        if not np.allclose(direction.T @ direction, np.eye(3), atol=1e-5):
+            raise ValueError("SimpleITK export requires an orthogonal voxel affine")
+        image = sitk.GetImageFromArray(array.transpose(2, 1, 0).copy())
+        image.SetSpacing(voxel_spacing.tolist())
+        image.SetOrigin(lps_affine[:3, 3].tolist())
+        image.SetDirection(direction.reshape(-1).tolist())
+    else:
+        # Preserve the historical array convention for datasets with no geometry metadata.
+        image = sitk.GetImageFromArray(array)
+        if spacing is not None:
+            spacing = [float(item) for item in spacing.reshape(-1).detach().cpu().tolist()]
+            if len(spacing) == 3:
+                image.SetSpacing(spacing)
     sitk.WriteImage(image, save_path)
 
 
@@ -227,12 +259,12 @@ def inference_method(
             f"Found {len(imgs_path)} pickle files but {len(pcs_path)} ply files."
         )
 
-    _, imgs_test, _, pcs_test = train_test_split(
-        np.array(imgs_path),
-        np.array(pcs_path),
-        test_size=test_size,
-        random_state=split_seed,
-    )
+    if (Path(data_fold) / 'splits' / 'test.txt').is_file():
+        imgs_test, pcs_test = read_split_pairs(data_fold, 'test')
+    else:
+        _, imgs_test, _, pcs_test = train_test_split(
+            np.array(imgs_path), np.array(pcs_path), test_size=test_size, random_state=split_seed,
+        )
     if max_cases is not None:
         imgs_test = imgs_test[:max_cases]
         pcs_test = pcs_test[:max_cases]
@@ -254,7 +286,8 @@ def inference_method(
         case_index = 0
         for batch_data in val_loader:
             input_projs = batch_data["input_imgs"].to(device)
-            gaussian_batch = model(input_projs.squeeze(2))
+            gaussian_batch = model(input_projs.squeeze(2) * model.input_scale)
+            gaussian_batch["density"] = gaussian_batch["density"] / model.density_unit
 
             for b_idx in range(input_projs.size(0)):
                 sample_name = get_sample_name(
@@ -274,7 +307,7 @@ def inference_method(
                     batch_data["sVoxel"][b_idx].to(device).reshape(-1),
                 )["vol"]
                 gt_volume = align_gt_volume_to_query(
-                    batch_data["vol_gts"][b_idx].to(device)
+                    batch_data["vol_gts"][b_idx].to(device), batch_data['gt_is_query_aligned'][b_idx],
                 ).squeeze()
 
                 if gt_volume.shape != pred_volume.shape:
@@ -299,9 +332,19 @@ def inference_method(
                 )
 
                 spacing = batch_data["dVoxel"][b_idx]
-                write_volume(pred_norm, osp.join(nii_dir, f"{sample_name}_pred.nii.gz"), spacing)
+                affine = None
+                metadata_path = Path(data_fold) / f"{sample_name}.json"
+                if metadata_path.is_file():
+                    metadata = json.loads(metadata_path.read_text())
+                    if metadata.get("schema") == "radgs-nanodrr-v1":
+                        affine = metadata["geometry"]["voxel_to_centered_ras_mm"]
+                write_volume(pred_norm, osp.join(nii_dir, f"{sample_name}_pred.nii.gz"), spacing, affine)
+                if affine is not None:
+                    write_volume(pred_volume, osp.join(nii_dir, f"{sample_name}_pred_mu.nii.gz"), voxel_to_ras_mm=affine)
                 if save_gt:
-                    write_volume(gt_norm, osp.join(nii_dir, f"{sample_name}_gt.nii.gz"), spacing)
+                    write_volume(gt_norm, osp.join(nii_dir, f"{sample_name}_gt.nii.gz"), spacing, affine)
+                    if affine is not None:
+                        write_volume(gt_volume, osp.join(nii_dir, f"{sample_name}_gt_mu.nii.gz"), voxel_to_ras_mm=affine)
                 if save_npy:
                     np.save(
                         osp.join(npy_dir, f"{sample_name}_pred.npy"),

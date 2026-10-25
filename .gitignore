@@ -44,3 +44,22 @@ r2_gaussian/submodules/xray-gaussian-rasterization-voxelization/**/*.egg-info/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local datasets, results, historical networks, and experiment utilities
+/configs/
+/data/
+/docs/
+/outputs/
+/patches/
+/tests/
+/networks/legacy/
+/networks/Reg3DNet.py
+/networks/PointRegM.py
+/scripts/
+/tools/diagnostics/
+/tools/experiments/
+/tools/monitoring/
+/tools/maintenance/
+/tools/release/
+/tools/media/
+/tools/chamfer_loss.py

@@ -1,5 +1,6 @@
 import glob
 import os
+from pathlib import Path
 import numpy as np
 import torch
 
@@ -15,13 +16,15 @@ from random import sample
 from torchvision import transforms
 from monai.transforms import Resize, Orientation
 from plyfile import PlyData
+from tools.data_contract import input_view_indices, volume_is_query_aligned
 
 
 class GSDataset(Dataset):
-    def __init__(self, imgs_path, pcs_path=None, state='train', num_points=10000):
+    def __init__(self, imgs_path, pcs_path=None, state='train', num_points=10000, load_points=True):
         super().__init__()
         self.imgs_path = imgs_path
-        self.pcs_path = pcs_path
+        self.pcs_path = pcs_path if pcs_path is not None else [str(Path(path).with_suffix('.ply')) for path in imgs_path]
+        self.load_points = load_points
         self.num_points = num_points  # 目标采样点数
 
         self.state = state
@@ -121,7 +124,7 @@ class GSDataset(Dataset):
     def __getitem__(self, index):
         # 从路径加载场景
         source_path = self.imgs_path[index]
-        model_path = os.path.split(self.imgs_path[index])[1].split('.')[0]
+        model_path = Path(source_path).stem
         scene = NetScene(model_path, source_path, shuffle=False)
 
         # 获取视点堆栈（包含相机的列表）
@@ -155,12 +158,14 @@ class GSDataset(Dataset):
             "FovX": [],
             "FovY": [],
             "sample_name": [],
-            "bbx": scene.bbox
+            "bbx": scene.bbox,
+            "gt_is_query_aligned": volume_is_query_aligned(scene.metadata),
         }
         # real xray 49
         # drr 24
-        ap_img = viewpoint_stack[24]
-        la_img = viewpoint_stack[0]
+        ap_index, la_index = input_view_indices(scene.metadata, len(viewpoint_stack))
+        ap_img = viewpoint_stack[ap_index]
+        la_img = viewpoint_stack[la_index]
         # 应用 Resize 变换调整图像大小
         ap_resized = self.resize_transform(ap_img.original_image)
         la_resized = self.resize_transform(la_img.original_image)
@@ -189,7 +194,8 @@ class GSDataset(Dataset):
         # 加载并处理 'gt' 数据
         # if self.pcs_path:
         ply_path = self.pcs_path[index]
-        gt = self.load_ply(ply_path, index)  # gt 是 (num_points, 11)
+        # Projection-only reconstruction skips point-cloud disk reads and sampling.
+        gt = self.load_ply(ply_path, index) if self.load_points else torch.empty((0, 3))
         # 将列表转换为张量（批量图像和相机参数）
         images_and_camera_poses["gt_gs"] = gt
 

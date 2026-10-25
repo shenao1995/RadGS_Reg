@@ -40,6 +40,7 @@ class SceneInfo(NamedTuple):
     vol: torch.tensor
     scanner_cfg: dict
     scene_scale: float
+    metadata: dict = None
 
 
 def readBlenderInfo(path, eval):
@@ -329,6 +330,7 @@ def readNAFInfo(path, eval):
         scanner_cfg=scanner_cfg,
         vol=vol_gt,
         scene_scale=scene_scale,
+        metadata=data.get("metadata", {}),
     )
     return scene_info
 

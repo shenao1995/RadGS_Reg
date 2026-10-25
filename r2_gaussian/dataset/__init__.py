@@ -70,6 +70,7 @@ class Scene:
         self.vol_gt = scene_info.vol
         self.scanner_cfg = scene_info.scanner_cfg
         self.scene_scale = scene_info.scene_scale
+        self.metadata = scene_info.metadata or {}
         self.bbox = torch.stack(
             [
                 torch.tensor(self.scanner_cfg["offOrigin"])
@@ -157,6 +158,7 @@ class NetScene:
         self.vol_gt = scene_info.vol
         self.scanner_cfg = scene_info.scanner_cfg
         self.scene_scale = scene_info.scene_scale
+        self.metadata = scene_info.metadata or {}
         self.bbox = torch.stack(
             [
                 torch.tensor(self.scanner_cfg["offOrigin"])

@@ -1,218 +1,130 @@
-import logging
-import os
-import sys
-import tempfile
-from glob import glob
-import SimpleITK as sitk
-import nibabel as nib
+"""Evaluate RegM on matched held-out pairs, or rigidly register two physical volumes."""
+import argparse
+import csv
+import json
+from pathlib import Path
+from types import SimpleNamespace
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from monai.config import print_config
-from monai.metrics import DiceMetric, MeanIoU, HausdorffDistanceMetric
-from monai.data import Dataset, DataLoader, decollate_batch, list_data_collate
-# from RegFormer3D import Reg3DFormer
-# from Reg3Donly import Reg3DFormer
-from ReconFormer import RecFormer
-from RecFormer_ResNet import RecResFormer
+from torch.utils.data import DataLoader,default_collate
 
-from r2_gaussian.utils.plot_utils import show_two_slice, show_two_volume, show_three_volume
-from monai.metrics import SSIMMetric, PSNRMetric
-# import pyvista as pv
-from skimage.measure import marching_cubes
-from scipy.ndimage import gaussian_filter
-from scipy.spatial import Delaunay
-from matplotlib import cm
-from matplotlib import colors
-from monai.transforms import (
-    Activationsd,
-    AsDiscreted,
-    Compose,
-    EnsureChannelFirstd,
-    LoadImaged,
-    Orientationd,
-    Resized,
-    SaveImage,
-    CropForegroundd,
-    ScaleIntensityd,
-
-)
-from collections import Counter
+from Reg3D_train import checkpoint_model,evaluate,atomic_json
+from tools.registration_data import RegistrationDataset
+from tools.registration_geometry import centered_affine, pose_matrix, warp_volume
 
 
-def inference_method(inference_files, log_dir):
-    img_size = 64
-    keys = ["moving", "fixed"]
-    infer_transforms = Compose(
-        [
-            LoadImaged(keys=keys, ensure_channel_first=True, image_only=False),
-            Resized(keys=keys, spatial_size=(img_size, img_size, img_size), mode='trilinear',
-                    align_corners=True),
-            ScaleIntensityd(keys=keys),
-        ]
-    )
-    # define dataset and dataloader
-    val_ds = Dataset(data=inference_files, transform=infer_transforms)
-    val_loader = DataLoader(val_ds, batch_size=1, num_workers=2, collate_fn=list_data_collate)
-    out_fold = 'recon_out/' + os.path.split(log_dir)[-1]
-    if not os.path.exists(out_fold):
-        os.mkdir(out_fold)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = RecFormer(
-        in_channels=2,
-        out_channels=1,
-        img_size=img_size,
-        feature_size=16,
-        hidden_size=768,
-        mlp_dim=3072,
-        num_heads=12,
-        proj_type="perceptron",
-        norm_name="instance",
-        res_block=True,
-    ).to(device)
-    # model = Reg3DFormer(
-    #     in_channels=2,
-    #     spatial_dims=3
-    # ).to(device)
-    # model = RecResFormer(
-    #     in_channels=2,
-    #     out_channels=1,
-    #     spatial_dims=3
-    # ).to(device)
-    model.load_state_dict(torch.load(log_dir + '/model1.pth'))
-    model.eval()
-    spacing = torch.tensor([0.5, 0.5, 0.5]).to(device)
-    ssim_metric = SSIMMetric(spatial_dims=3)
-    psnr_metric = PSNRMetric(max_val=1)
-    saver = SaveImage(output_dir=out_fold, output_ext=".nii.gz", output_postfix='',
-                      separate_folder=False, writer='NibabelWriter', resample=True, mode='trilinear')
-    ssim_values = []
-    psnr_values = []
-    with torch.no_grad():
-        count = 0
-        for val_data in val_loader:
-            count += 1
-            val_movings, val_fixeds = (
-                val_data["moving"].to(device),
-                val_data["fixed"].to(device),
-            )
-            sample_name = os.path.split(val_data['moving_meta_dict']['filename_or_obj'][0])[-1]
-
-            # if 'dukemei_L3' in sample_name:
-            print(sample_name)
-            # val_recon_fixed, val_pose_params, val_transformed_movs = model(val_movings, val_fixeds, spacing)
-            val_recon_fixed = model(val_movings, val_fixeds)
-            # val_pose_params, val_transformed_movs = model(val_movings, val_fixeds, spacing)
-            # pred_rotated = torch.rot90(val_recon_fixed.squeeze(), -1, dims=(0, 2))
-            out_vol_pred = sitk.GetImageFromArray(val_recon_fixed.squeeze().cpu().numpy())
-            out_vol_pred.SetSpacing([0.5, 0.5, 0.5])
-            sitk.WriteImage(out_vol_pred,
-                            os.path.join(out_fold, sample_name.replace('gt', 'pred')))
-            # show_two_volume(val_movings.squeeze(), val_recon_fixed.squeeze(), axis=0)
-            # visualize_3d(val_recon_fixed.squeeze(), val_movings.squeeze(), spacing.cpu().numpy())
-            ssim_metric(y_pred=val_movings, y=val_recon_fixed)
-            psnr_metric(y_pred=val_movings, y=val_recon_fixed)
-            # saver(val_recon_fixed[0])
-            std_ssim_3d = ssim_metric.aggregate().item()
-            std_psnr_3d = psnr_metric.aggregate().item()
-            print(std_ssim_3d)
-            ssim_values.append(std_ssim_3d)
-            psnr_values.append(std_psnr_3d)
-        ssim_3d = ssim_metric.aggregate().item()
-        psnr_3d = psnr_metric.aggregate().item()
-
-        print(f"SSIM 3D: {ssim_3d * 100:.2f}±{np.std(ssim_values) * 100:.2f}")
-        print(f"PSNR 3D: {psnr_3d:.2f}±{np.std(psnr_values):.2f}")
-        ssim_metric.reset()
-        psnr_metric.reset()
+def network_canvas(model,device):
+    size=int(model.config.get('input_size',96))
+    if size<=0 or size!=model.input_size:
+        raise ValueError('Invalid or inconsistent saved RegM input grid')
+    shape=(size,)*3
+    return shape,centered_affine(shape,192./size,device=device)
 
 
-def visualize_3d(target, registered, spacing, threshold=None):
-    plotter = pv.Plotter(line_smoothing=True)
-    grid = pv.ImageData()
-    grid.dimensions = np.array(registered.shape)  # 维度需要 +1
-    grid.origin = (0, 0, 0)  # 设置原点
-    grid.spacing = spacing  # 设置间距
-    grid.point_data["difference"] = registered.cpu().numpy().flatten(order="F")  # 将差异数据添加到点数据
-    masked_grid = grid.threshold([0.15, 1.0], scalars="difference")
-    plotter.add_volume(masked_grid, cmap="viridis", clim=[0.15, 1])
-    plotter.show()
-    # 创建PyVista的spine_bbox和计算其中心
-    # pv_spine_bbox, spine_center = create_pv_box_from_open3d_bbox(spine_bbox)
-    # 计算图像的中心位置
-    # D, H, W = target.shape
-    # image_center = np.array([W * spacing[2] / 2, H * spacing[1] / 2, D * spacing[0] / 2])
-    # 计算需要的平移向量
-    # shift = spine_center - image_center
-    # print(f"Shifting images by: {shift}")
-    # registered = torch.where(registered < 0.15, np.nan, registered)
-    # target = torch.where(target < 0.15, np.nan, target)
-    # difference = np.abs(registered - target)
-    # # # 将差异数据转换为 PyVista 的 ImageData 对象
-    # grid = pv.ImageData()
-    # grid.dimensions = np.array(registered.shape)  # 维度需要 +1
-    # grid.origin = (0, 0, 0)  # 设置原点
-    # grid.spacing = spacing  # 设置间距
-    # grid.point_data["difference"] = difference.flatten(order="F")  # 将差异数据添加到点数据
-    # # 设置差异阈值
-    # masked_grid = grid.threshold([0.05, 1.0], scalars="difference")  # 过滤差异大于阈值的区域
-    # # 创建绘图窗口
-    # plotter = pv.Plotter()
-    # # 添加热图
-    # plotter.add_volume(
-    #     target.cpu().numpy(),
-    #     clim=[0, 1],
-    #     cmap="viridis",  # 使用 coolwarm 颜色映射
-    #     opacity=1
-    # )
-    # 设置标题和背景
-    # plotter.add_title("3D Heatmap of Prediction vs Ground Truth", font_size=16)
-    # plotter.set_background("white")
-    # plotter.show()
-
-    # registered = torch.where(registered < 0.15, np.nan, registered)
-    # target = torch.where(target < 0.15, np.nan, target)
-    # target_mesh = array2mesh(target.cpu().numpy(), spacing)
-    # register_mesh = array2mesh(registered.cpu().numpy(), spacing)
-    # plotter = pv.Plotter()
-    # plotter.add_mesh(target_mesh, color="red")
-    # plotter.add_mesh(register_mesh, color="gray")
-    # plotter.show_grid()
-    # plotter.add_axes()
-    # plotter.show()
+def read_volume(path,device):
+    import SimpleITK as sitk
+    image=sitk.ReadImage(str(path))
+    array=sitk.GetArrayFromImage(image).transpose(2,1,0).copy()
+    affine=np.eye(4)
+    affine[:3,:3]=np.array(image.GetDirection()).reshape(3,3)@np.diag(image.GetSpacing())
+    affine[:3,3]=image.GetOrigin()
+    affine=np.diag([-1.,-1.,1.,1.])@affine # ITK LPS -> physical RAS
+    return torch.tensor(array,device=device,dtype=torch.float32)[None,None],torch.tensor(affine,device=device,dtype=torch.float32)
 
 
-def array2mesh(array, space):
-    grid = pv.ImageData()
-    grid.dimensions = np.array(array.shape)  # 维度需要 +1
-    grid.origin = (0, 0, 0)  # 设置原点
-    grid.spacing = space  # 设置间距
-    verbose = False
-    grid.point_data["values"] = (
-            array.flatten(order="F") > 0
-    )
-    try:
-        mesh = grid.contour_labeled(smoothing=True, progress_bar=verbose)
-    except AttributeError as e:
-        raise AttributeError(
-            f"{e}, ensure you are using pyvista>=0.43 and vtk>=9.3"
-        )
-    mesh.extract_largest(inplace=True, progress_bar=verbose)
-    mesh.point_data.clear()
-    mesh.cell_data.clear()
-    mesh.smooth_taubin(
-        n_iter=100,
-        feature_angle=120.0,
-        boundary_smoothing=False,
-        feature_smoothing=False,
-        non_manifold_smoothing=True,
-        normalize_coordinates=True,
-        inplace=True,
-        progress_bar=verbose,
-    )
-    # mesh.point_data["values"] = (
-    #     difference.flatten(order="F") > 0
-    # )
-    mesh.fill_holes(100, inplace=True, progress_bar=verbose)
-    mesh.clean(inplace=True, progress_bar=verbose)
-    return mesh
+def save_volume(path,volume,affine):
+    import SimpleITK as sitk
+    affine=affine.detach().cpu().numpy();lps=np.diag([-1.,-1.,1.,1.])@affine
+    spacing=np.linalg.norm(lps[:3,:3],axis=0)
+    image=sitk.GetImageFromArray(volume[0,0].detach().cpu().numpy().transpose(2,1,0).copy())
+    image.SetSpacing(spacing.tolist());image.SetOrigin(lps[:3,3].tolist())
+    image.SetDirection((lps[:3,:3]/spacing[None]).reshape(-1).tolist())
+    sitk.WriteImage(image,str(path))
+
+
+@torch.no_grad()
+def register_files(args,model):
+    device='cuda';moving,ma=read_volume(args.moving,device);fixed,fa=read_volume(args.fixed,device)
+    # Network transforms rotate around the fixed ROI centre; export transforms in global RAS.
+    centre=(fa[:3,:3]@torch.tensor([(n-1)/2 for n in fixed.shape[-3:]],device=device))+fa[:3,3]
+    ma_local=ma.clone();ma_local[:3,3]-=centre
+    fa_local=fa.clone();fa_local[:3,3]-=centre
+    shape,ca=network_canvas(model,device);identity=torch.eye(4,device=device)
+    moving_canvas=warp_volume(moving,identity,ma_local,ca,output_shape=shape)
+    fixed_canvas=warp_volume(fixed,identity,fa_local,ca,output_shape=shape)
+    if moving_canvas.max()<=0 or fixed_canvas.max()<=0:
+        raise ValueError('Empty input or no physical overlap with the fixed 192mm canvas; provide volumes in a common initial RAS frame')
+    if moving_canvas.max()>.2 or fixed_canvas.max()>.2:
+        raise ValueError('Expected linear attenuation volumes in 1/mm, not raw HU or independently normalized intensities')
+    with torch.autocast(device_type='cuda',dtype=torch.bfloat16,enabled=not args.no_amp):pose=model(moving_canvas,fixed_canvas)
+    local=pose_matrix(pose.float())[0];global_matrix=local.clone()
+    global_matrix[:3,3]=local[:3,3]+centre-local[:3,:3]@centre
+    warped=warp_volume(moving,global_matrix,ma,fa,output_shape=fixed.shape[-3:])
+    save_volume(Path(args.output_dir)/'registered_moving.nii.gz',warped,fa)
+    atomic_json(Path(args.output_dir)/'transform.json',dict(moving_to_fixed_ras_mm=global_matrix.cpu().tolist(),
+        local_pose_axis_angle_rad_translation_mm=pose[0].cpu().tolist(),rotation_centre_ras_mm=centre.cpu().tolist(),
+        moving=str(Path(args.moving).resolve()),fixed=str(Path(args.fixed).resolve()),checkpoint=args.checkpoint,
+        network_input_shape=list(shape),network_spacing_mm=192./shape[0],
+        intensity_unit='1/mm',registered_volume='registered_moving.nii.gz'))
+
+
+@torch.no_grad()
+def evaluate_split(args,model):
+    protocol=json.loads((Path(args.data_dir)/'manifest.json').read_text())['protocol']
+    native=protocol.get('cache_format')=='ct_rec_native128_float16'
+    if native:
+        from tools.registration_native_data import NativeRegistrationDataset, prepare_native_pair
+        from registration_native_train import evaluate_native
+        dataset=NativeRegistrationDataset(args.data_dir,args.split,args.limit)
+        evaluator=evaluate_native
+    else:
+        if model.input_size!=96:
+            raise ValueError('A high-resolution model requires its original1mm cache or physical input files')
+        dataset=RegistrationDataset(args.data_dir,args.split,args.limit)
+        evaluator=evaluate
+    loader=DataLoader(dataset,batch_size=args.batch_size,num_workers=args.workers,pin_memory=True)
+    metrics,rows=evaluator(model,loader,'cuda',dataset.affine.cuda(),SimpleNamespace(amp=not args.no_amp),fixed_mode=args.fixed_mode)
+    output=Path(args.output_dir)
+    with (output/'cases.csv').open('w') as f:
+        writer=csv.DictWriter(f,fieldnames=list(rows[0]));writer.writeheader();writer.writerows(rows)
+    atomic_json(output/'cases.json',rows)
+    atomic_json(output/'evaluation.json',dict(checkpoint=str(Path(args.checkpoint).resolve()),split=args.split,cases=len(rows),fixed_mode=args.fixed_mode,metrics=metrics,
+        pose_error='Absolute translation differences in RAS mm; absolute xyz Euler components of R_pred R_gt^T in degrees',
+        mTRE='64 fixed foreground physical landmarks, transformed to moving by inverse(T_gt), then by T_pred',
+        dataset_protocol=dataset.protocol))
+    print(json.dumps(metrics,indent=2),flush=True)
+    # Optional actual rigidly warped CT export; no image decoder prediction.
+    for index in range(min(args.export_cases,len(dataset))):
+        sample=dataset[index]
+        affine=dataset.affine.cuda()
+        if native:
+            moving,fixed,_=prepare_native_pair(default_collate([sample]),'cuda',affine,fixed_mode=args.fixed_mode)
+        else:
+            moving=sample['moving'][None].cuda()
+            fixed=sample['fixed_rec' if args.fixed_mode=='rec' else 'canonical'][None].cuda()
+        with torch.autocast(device_type='cuda',dtype=torch.bfloat16,enabled=not args.no_amp):pose=model(moving,fixed)
+        matrix=pose_matrix(pose.float())
+        warped=warp_volume(moving,matrix,affine,affine)
+        save_volume(output/f'{sample["name"]}_registered.nii.gz',warped,affine)
+        atomic_json(output/f'{sample["name"]}_transform.json',dict(moving_to_fixed=matrix[0].cpu().tolist(),ground_truth=sample['transform'].tolist()))
+
+
+def main():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--checkpoint',required=True);p.add_argument('--output-dir',required=True)
+    p.add_argument('--data-dir');p.add_argument('--split',choices=['train','val','test'],default='val')
+    p.add_argument('--moving');p.add_argument('--fixed');p.add_argument('--fixed-mode',choices=['ct','rec'],default='rec')
+    p.add_argument('--batch-size',type=int,default=8);p.add_argument('--workers',type=int,default=2)
+    p.add_argument('--limit',type=int,default=0);p.add_argument('--export-cases',type=int,default=0);p.add_argument('--no-amp',action='store_true')
+    args=p.parse_args()
+    if bool(args.moving)!=bool(args.fixed):p.error('--moving and --fixed must be provided together')
+    if not args.moving and not args.data_dir:p.error('Provide --data-dir or --moving/--fixed')
+    Path(args.output_dir).mkdir(parents=True,exist_ok=True)
+    torch.set_num_threads(2);torch.cuda.set_device(0)
+    torch.backends.cuda.matmul.allow_tf32=True;torch.backends.cudnn.allow_tf32=True
+    model,_=checkpoint_model(args.checkpoint);model.eval()
+    if args.moving:register_files(args,model)
+    else:evaluate_split(args,model)
+
+
+if __name__=='__main__':main()
